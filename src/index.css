@@ -1,0 +1,76 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+
+  --color-bg-primary: #080808;
+  --color-bg-surface: #0C0C0C;
+  --color-bg-elevated: #18181b;
+
+  --color-border-default: #27272a;
+  --color-border-active: #3f3f46;
+
+  --color-accent-primary: #f97316;
+  
+  --color-text-primary: #d4d4d8;
+  --color-text-secondary: #a1a1aa;
+  --color-text-muted: #71717a;
+  --color-text-disabled: #52525b;
+
+  --color-status-online: #10b981;
+  --color-status-offline: #ef4444;
+  --color-status-incall: #f97316;
+  --color-status-searching: #f59e0b;
+
+  --color-accent-purple: #ea580c;
+  --color-danger: #ef4444;
+  --color-danger-bg: rgba(69, 10, 10, 0.4);
+  --color-danger-border: rgba(127, 29, 29, 0.5);
+  --color-success: #10b981;
+  --color-warning-bg: #422006;
+
+  --animate-spin: spin 1s linear infinite;
+  --animate-pulse: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-fadeUp: fadeUp 0.3s ease-out forwards;
+  --animate-fadeOut: fadeOut 0.3s ease-out forwards;
+  --animate-wave: wave 0.8s ease-in-out infinite alternate;
+  --animate-matchPop: matchPop 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+  --animate-slideDown: slideDown 0.3s ease-out forwards;
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(14px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes fadeOut {
+    from { opacity: 1; }
+    to { opacity: 0; transform: translateY(-8px); }
+  }
+  @keyframes wave {
+    from { transform: scaleY(0.2); }
+    to { transform: scaleY(1); }
+  }
+  @keyframes matchPop {
+    0% { transform: scale(0.7); opacity: 0; }
+    60% { transform: scale(1.1); opacity: 1; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  @keyframes slideDown {
+    from { opacity: 0; transform: translateY(-10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
+
+@layer base {
+  body {
+    background-color: var(--color-bg-primary);
+    color: var(--color-text-primary);
+    color-scheme: dark;
+  }
+}
+
+@layer utilities {
+  .bg-accent-gradient {
+    background-image: linear-gradient(to top right, #ea580c, #fbbf24);
+  }
+}
