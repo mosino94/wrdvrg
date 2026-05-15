@@ -9,6 +9,7 @@ export function useMatchmaking() {
   const { alias, gender, countryCode } = useAppStore();
   const { genderFilter, preferCountries, blockCountries } = useFilterStore();
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const queueIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -19,28 +20,35 @@ export function useMatchmaking() {
         const { data: profile } = await supabase.from('profiles').select('id').eq('alias', alias).single();
         if (!profile) return; // Wait until profile is ready
 
-        // 1. Insert into queue
-        const { error } = await supabase.from('queue').insert({
-          profile_id: profile.id,
-          gender_filter: genderFilter,
-          prefer_countries: preferCountries,
-          avoid_countries: blockCountries,
-          status: 'waiting'
+        // 1. Insert into queue via backend to bypass RLS issues for guests
+        const enqueueRes = await fetch('/api/enqueue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            profileId: profile.id,
+            genderFilter,
+            preferCountries,
+            avoidCountries: blockCountries
+          })
         });
 
-        if (error) {
-          console.error('Queue error:', error);
+        if (!enqueueRes.ok) {
+          const err = await enqueueRes.json();
+          console.error('Queue error:', err);
           if (active) setCallState('idle');
           return;
         }
 
-        // 2. Start heartbeat (every 10s) to keep queue active
+        const enqueueData = await enqueueRes.json();
+        queueIdRef.current = enqueueData.queueId;
+
+        // 2. Start heartbeat (every 10s) via backend
         heartbeatIntervalRef.current = setInterval(() => {
-          supabase.from('queue')
-            .update({ last_heartbeat: new Date().toISOString() })
-            .eq('profile_id', profile.id)
-            .eq('status', 'waiting')
-            .then();
+          fetch('/api/heartbeat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profileId: profile.id, queueId: queueIdRef.current })
+          }).catch(console.error);
         }, 10000);
 
         // 3. Subscribe to queue changes
@@ -92,7 +100,12 @@ export function useMatchmaking() {
     const cleanupQueue = async () => {
       const { data: profile } = await supabase.from('profiles').select('id').eq('alias', alias).single();
       if (profile) {
-        await supabase.from('queue').delete().eq('profile_id', profile.id);
+        await fetch('/api/dequeue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profileId: profile.id, queueId: queueIdRef.current })
+        }).catch(() => {});
+        queueIdRef.current = null;
       }
     };
 

@@ -36,6 +36,58 @@ async function createMeetingToken(roomName: string, userName: string) {
   return data.token;
 }
 
+app.post('/api/sync-profile', async (req, res) => {
+  try {
+    const { alias, countryCode, gender } = req.body;
+    if (!alias) return res.status(400).json({ error: 'Alias is required' });
+    
+    const supabase = createServiceClient();
+    
+    let { data: profile } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('alias', alias)
+      .maybeSingle();
+
+    if (!profile) {
+      const { data: newProfile, error } = await supabase
+        .from('profiles')
+        .insert({
+          alias,
+          country_code: countryCode || null,
+          gender: gender || null,
+          is_guest: true
+        })
+        .select()
+        .single();
+        
+      if (error) throw error;
+      profile = newProfile;
+    } else {
+      // Update country/gender if changed
+      const updates: any = {};
+      let needsUpdate = false;
+      if (countryCode && profile.country_code !== countryCode) { updates.country_code = countryCode; needsUpdate = true; }
+      if (gender !== undefined && profile.gender !== gender) { updates.gender = gender; needsUpdate = true; }
+      
+      if (needsUpdate) {
+        const { data: updated, error } = await supabase
+          .from('profiles')
+          .update(updates)
+          .eq('id', profile.id)
+          .select()
+          .single();
+        if (!error && updated) profile = updated;
+      }
+    }
+    
+    return res.json(profile);
+  } catch (err: any) {
+    console.error('Sync profile error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── 2. ENQUEUE FUNCTION ───
 app.post('/api/enqueue', async (req, res) => {
   try {
