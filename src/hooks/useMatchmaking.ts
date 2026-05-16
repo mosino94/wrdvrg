@@ -18,9 +18,8 @@ export function useMatchmaking() {
     const startSearching = async () => {
       try {
         const { data: profile } = await supabase.from('profiles').select('id').eq('alias', alias).single();
-        if (!profile) return; // Wait until profile is ready
+        if (!profile) return;
 
-        // 1. Insert into queue via backend to bypass RLS issues for guests
         const enqueueRes = await fetch('/api/enqueue', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -42,7 +41,7 @@ export function useMatchmaking() {
         const enqueueData = await enqueueRes.json();
         queueIdRef.current = enqueueData.queueId;
 
-        // 2. Start heartbeat (every 10s) via backend
+        // Start heartbeat
         heartbeatIntervalRef.current = setInterval(() => {
           fetch('/api/heartbeat', {
             method: 'POST',
@@ -51,7 +50,7 @@ export function useMatchmaking() {
           }).catch(console.error);
         }, 10000);
 
-        // 3. Subscribe to queue changes
+        // Subscribe to our queue row for match notification
         realtimeChannel = supabase.channel(`queue-${profile.id}`)
           .on(
             'postgres_changes',
@@ -62,42 +61,48 @@ export function useMatchmaking() {
               filter: `profile_id=eq.${profile.id}`
             },
             async (payload) => {
-              if (payload.new.status === 'matched') {
-                if (active) {
-                  setCallState('connecting');
+              if (payload.new.status === 'matched' && active) {
+                setCallState('connecting');
 
-                  // Extract peer details
-                  const { data: peerData } = await supabase.from('profiles')
-                    .select('alias, country_code, gender')
-                    .eq('id', payload.new.last_peer_id)
-                    .single();
-
-                  setPeerDetails({
-                    id: payload.new.last_peer_id,
-                    alias: peerData?.alias || 'Anonymous',
-                    country: peerData?.country_code || null,
-                    gender: peerData?.gender || null
-                  });
-
-                  // We now have room info assigned by matching worker
-                  setRoomDetails({
-                    id: payload.new.id, // using queue id or ideally a room id from real room
-                    url: payload.new.room_url,
-                    token: payload.new.room_token
-                  });
-                  
-                  // In a real flow, useCall hook handles the Daily.co join and moves to 'connected'
+                const matchedPeerId = payload.new.matched_peer_id;
+                if (!matchedPeerId) {
+                  console.error('matched_peer_id is missing from queue row');
+                  return;
                 }
+
+                const { data: peerData } = await supabase.from('profiles')
+                  .select('id, alias, country_code, gender')
+                  .eq('id', matchedPeerId)
+                  .single();
+
+                setPeerDetails({
+                  id: matchedPeerId,
+                  alias: peerData?.alias || 'Anonymous',
+                  country: peerData?.country_code || null,
+                  gender: peerData?.gender || null
+                });
+
+                setRoomDetails({
+                  id: payload.new.id,
+                  url: payload.new.room_url,
+                  token: payload.new.room_token
+                });
               }
             }
           )
-          .subscribe();
+          .subscribe((status) => {
+            if (status === 'SUBSCRIBED') {
+              console.log('Matchmaking realtime subscribed for', profile.id);
+            }
+          });
       } catch (err) {
+        console.error('startSearching error:', err);
         if (active) setCallState('idle');
       }
     };
 
     const cleanupQueue = async () => {
+      if (!alias) return;
       const { data: profile } = await supabase.from('profiles').select('id').eq('alias', alias).single();
       if (profile) {
         await fetch('/api/dequeue', {
@@ -112,16 +117,12 @@ export function useMatchmaking() {
     if (callState === 'searching') {
       startSearching();
     } else {
-      // Cleanup if leaving searching state
       if (heartbeatIntervalRef.current) {
         clearInterval(heartbeatIntervalRef.current);
       }
       if (realtimeChannel) {
         supabase.removeChannel(realtimeChannel);
       }
-      // If we went from searching -> idle (user cancelled)
-      // we must remove ourselves from queue.
-      // Do this async.
       if (callState === 'idle') {
         cleanupQueue();
       }

@@ -64,7 +64,6 @@ app.post('/api/sync-profile', async (req, res) => {
       if (error) throw error;
       profile = newProfile;
     } else {
-      // Update country/gender if changed
       const updates: any = {};
       let needsUpdate = false;
       if (countryCode && profile.country_code !== countryCode) { updates.country_code = countryCode; needsUpdate = true; }
@@ -131,7 +130,7 @@ app.post('/api/enqueue', async (req, res) => {
       return res.status(409).json({ error: 'already_in_call' });
     }
 
-    // STEP 4: Get user's last peer (to avoid rematch)
+    // STEP 4: Get last 5 peers to avoid rematch
     const { data: lastCall } = await supabase
       .from('call_history')
       .select('peer_id')
@@ -248,7 +247,6 @@ interface ScoredPair {
   reason: string;
 }
 
-// Ensure the map tracks if the match worker is running to avoid overlap
 let isMatchWorkerRunning = false;
 async function matchWorker() {
   if (isMatchWorkerRunning) return;
@@ -322,29 +320,23 @@ async function matchWorker() {
         const breakdown: Record<string, number> = {};
         let reason = '';
 
-        // HARD BLOCKS
         if (A.profile_id === B.profile_id) continue;
         if (isBlocked(A.profile_id, B.profile_id)) continue;
         if (A.last_peer_id === B.profile_id || B.last_peer_id === A.profile_id) continue;
         if (A.last_5_peers?.includes(B.profile_id) || B.last_5_peers?.includes(A.profile_id)) continue;
         
-        // GENDER FILTER
         if (A.gender_filter !== 'all' && profileB.gender !== A.gender_filter) continue;
         if (B.gender_filter !== 'all' && profileA.gender !== B.gender_filter) continue;
 
-        // COUNTRY BLOCK
         if (A.avoid_countries?.length > 0 && A.avoid_countries.includes(profileB.country_code)) continue;
         if (B.avoid_countries?.length > 0 && B.avoid_countries.includes(profileA.country_code)) continue;
 
-        // REPUTATION GATE
         if (profileA.reputation < 20 && profileB.reputation > 60) continue;
         if (profileB.reputation < 20 && profileA.reputation > 60) continue;
 
-        // SOFT SCORES
         let score = 100;
         reason = 'base';
 
-        // COUNTRY PREFERENCE
         if (A.prefer_countries?.length > 0 && A.prefer_countries.includes(profileB.country_code)) {
           score += 50; breakdown['a_prefers_b_country'] = 50; reason = 'country_preferred';
         }
@@ -361,7 +353,6 @@ async function matchWorker() {
           score += 40; breakdown['mutual_country_prefer'] = 40; reason = 'mutual_country_preferred';
         }
 
-        // GENDER MATCH
         if (B.gender_filter !== 'all' && profileA.gender === B.gender_filter) {
           score += 15; breakdown['a_matches_b_filter'] = 15;
         }
@@ -369,13 +360,11 @@ async function matchWorker() {
           score += 15; breakdown['b_matches_a_filter'] = 15;
         }
 
-        // REPUTATION SIMILARITY
         const repDiff = Math.abs(profileA.reputation - profileB.reputation);
         if (repDiff < 10) { score += 25; breakdown['similar_reputation'] = 25; }
         else if (repDiff < 20) { score += 15; breakdown['similar_reputation'] = 15; }
         else if (repDiff < 35) { score += 5; breakdown['similar_reputation'] = 5; }
 
-        // WAIT TIME FAIRNESS
         const waitA = Math.floor((now - new Date(A.joined_at).getTime()) / 1000);
         const waitB = Math.floor((now - new Date(B.joined_at).getTime()) / 1000);
         
@@ -383,10 +372,8 @@ async function matchWorker() {
         if (waitA > 20 || waitB > 20) { score += 15; breakdown['urgent_wait'] = 15; }
         if (waitA > 30 || waitB > 30) { score += 30; breakdown['critical_wait'] = 30; reason = 'urgent_timeout'; }
 
-        // SKIP COUNT PENALTY
         if (A.skip_count > 5 || B.skip_count > 5) { score -= 10; breakdown['skip_spam_penalty'] = -10; }
 
-        // REPUTATION PENALTY
         if (profileA.reputation < 40) {
           const pen = -Math.floor((40 - profileA.reputation) / 2); score += pen; breakdown['a_low_rep_penalty'] = pen;
         }
@@ -394,16 +381,13 @@ async function matchWorker() {
           const pen = -Math.floor((40 - profileB.reputation) / 2); score += pen; breakdown['b_low_rep_penalty'] = pen;
         }
 
-        // NO-FILTER BONUS
         const aHasNoFilters = A.gender_filter === 'all' && (!A.prefer_countries?.length) && (!A.avoid_countries?.length);
         const bHasNoFilters = B.gender_filter === 'all' && (!B.prefer_countries?.length) && (!B.avoid_countries?.length);
         if (aHasNoFilters && bHasNoFilters) { score += 10; breakdown['both_no_filters'] = 10; }
 
-        // RANDOM JITTER
         const jitter = Math.floor(Math.random() * 8);
         score += jitter; breakdown['jitter'] = jitter;
 
-        // MINIMUM SCORE
         score = Math.max(score, 1);
         scoredPairs.push({ userA: A, userB: B, score, breakdown, reason });
       }
@@ -449,15 +433,16 @@ async function matchWorker() {
         });
         
         if (!roomResponse.ok) {
-           console.error("Daily API Error", await roomResponse.text());
-           throw new Error("Failed to create room in Daily.co");
+           console.error('Daily API Error', await roomResponse.text());
+           throw new Error('Failed to create room in Daily.co');
         }
         
         const room = await roomResponse.json();
         
-        // Use an empty or fallback name if alias is missing
-        const aliasA = (Array.isArray(match.userA.profiles) ? match.userA.profiles[0] : match.userA.profiles).alias || 'Guest A';
-        const aliasB = (Array.isArray(match.userB.profiles) ? match.userB.profiles[0] : match.userB.profiles).alias || 'Guest B';
+        const profileA = Array.isArray(match.userA.profiles) ? match.userA.profiles[0] : match.userA.profiles;
+        const profileB = Array.isArray(match.userB.profiles) ? match.userB.profiles[0] : match.userB.profiles;
+        const aliasA = profileA.alias || 'Guest A';
+        const aliasB = profileB.alias || 'Guest B';
 
         const tokenA = await createMeetingToken(room.name, aliasA);
         const tokenB = await createMeetingToken(room.name, aliasB);
@@ -471,6 +456,7 @@ async function matchWorker() {
           match_reason: match.reason,
         }).select().single();
 
+        // set matched_peer_id so frontend knows who they matched with
         await supabase
           .from('queue')
           .update({
@@ -478,6 +464,7 @@ async function matchWorker() {
             room_url: room.url,
             room_token: tokenA,
             matched_at: new Date().toISOString(),
+            matched_peer_id: match.userB.profile_id,
           })
           .eq('id', match.userA.id);
 
@@ -488,6 +475,7 @@ async function matchWorker() {
             room_url: room.url,
             room_token: tokenB,
             matched_at: new Date().toISOString(),
+            matched_peer_id: match.userA.profile_id,
           })
           .eq('id', match.userB.id);
 
@@ -511,7 +499,7 @@ async function matchWorker() {
         });
 
       } catch (err: any) {
-        console.error(`Failed to create room for match:`, err);
+        console.error('Failed to create room for match:', err);
         await supabase
           .from('queue')
           .update({ status: 'waiting' })
@@ -554,16 +542,14 @@ async function cleanupStale() {
   }
 }
 
-// Start intervals for workers
 setInterval(matchWorker, 2000);
 setInterval(cleanupStale, 30000);
 
 async function startServer() {
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
-      appType: "spa",
+      appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
@@ -574,7 +560,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }
