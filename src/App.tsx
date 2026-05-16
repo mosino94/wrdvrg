@@ -10,7 +10,6 @@ import { genDeviceAlias } from './lib/fingerprint';
 import { useMatchmaking } from './hooks/useMatchmaking';
 import { useCall } from './hooks/useCall';
 
-// Component to run global hooks without breaking React Router setup
 function GlobalHooks() {
   useMatchmaking();
   useCall();
@@ -23,7 +22,6 @@ export default function App() {
   const [profileSynced, setProfileSynced] = React.useState(false);
 
   useEffect(() => {
-    // 1. Alias Generation
     let currentAlias = alias;
     if (!currentAlias) {
       currentAlias = genDeviceAlias();
@@ -34,54 +32,41 @@ export default function App() {
       setShowGenderModal(true);
     }
 
-    // 2. Country detection
     const detectCountry = async () => {
       let finalCountry = 'US';
       try {
-        const r = await fetch('https://ipworld.info/api/ip/self_country'); // returns "US" directly
+        // Route through our own API to avoid CORS
+        const r = await fetch('/api/country');
         if (r.ok) {
-           const d = await r.text();
-           if (d && d.trim().length === 2) finalCountry = d.trim().toUpperCase();
+          const { country } = await r.json();
+          if (country && country.length === 2) finalCountry = country;
         }
-      } catch (e) {
-        try {
-          const r0 = await fetch('https://ip2c.org/self');
-          const d0 = await r0.text();
-          if (d0 && d0.startsWith('1;')) {
-            const code = d0.split(';')[1];
-            if (code) finalCountry = code;
-          }
-        } catch (e) {
-           finalCountry = navigator.language.split('-')[1]?.toUpperCase() || navigator.language.substring(0, 2).toUpperCase() || 'US';
-        }
+      } catch {
+        finalCountry = navigator.language.split('-')[1]?.toUpperCase() || 'US';
       }
       setCountryCode(finalCountry);
-      
-      // Sync DB Profile
+
       try {
         await fetch('/api/sync-profile', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ alias: currentAlias, countryCode: finalCountry, gender })
+          body: JSON.stringify({ alias: currentAlias, countryCode: finalCountry, gender }),
         });
         setProfileSynced(true);
-      } catch (e) {
-         console.error(e);
-         // Fallback allow app to load
-         setProfileSynced(true);
+      } catch {
+        setProfileSynced(true);
       }
     };
     detectCountry();
   }, [alias, setAlias, setCountryCode]);
 
   useEffect(() => {
-    // If gender changes later (e.g. from modal), sync again to save
     if (profileSynced && alias) {
-       fetch('/api/sync-profile', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ alias, countryCode, gender })
-       }).catch(() => {});
+      fetch('/api/sync-profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alias, countryCode, gender }),
+      }).catch(() => {});
     }
   }, [gender, profileSynced]);
 
@@ -103,20 +88,20 @@ export default function App() {
             <h2 className="text-xl font-bold mb-2">Welcome!</h2>
             <p className="text-zinc-400 text-sm mb-6">Before you start connecting, what's your gender?</p>
             <div className="flex gap-2 justify-center mb-6">
-              <button 
+              <button
                 onClick={() => { setGender('male'); setShowGenderModal(false); localStorage.setItem('whisper_gender_prompted', 'true'); }}
                 className="flex-1 py-3 bg-zinc-900 border border-zinc-800 hover:border-orange-500 hover:bg-orange-500/10 rounded-xl transition-all font-medium flex flex-col items-center gap-1"
               >
                 <span className="text-2xl">👨</span> Male
               </button>
-              <button 
+              <button
                 onClick={() => { setGender('female'); setShowGenderModal(false); localStorage.setItem('whisper_gender_prompted', 'true'); }}
                 className="flex-1 py-3 bg-zinc-900 border border-zinc-800 hover:border-orange-500 hover:bg-orange-500/10 rounded-xl transition-all font-medium flex flex-col items-center gap-1"
               >
                 <span className="text-2xl">👩</span> Female
               </button>
             </div>
-            <button 
+            <button
               onClick={() => { setShowGenderModal(false); localStorage.setItem('whisper_gender_prompted', 'true'); }}
               className="text-zinc-500 hover:text-zinc-300 text-sm underline underline-offset-4"
             >

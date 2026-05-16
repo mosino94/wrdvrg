@@ -28,26 +28,21 @@ async function matchWorker() {
   try {
     const supabase = createServiceClient();
     const startTime = Date.now();
-
     const staleThreshold = new Date(Date.now() - 30_000).toISOString();
     const { data: staleEntries } = await supabase.from('queue').select('id, profile_id').eq('status', 'waiting').lt('last_heartbeat', staleThreshold);
     if (staleEntries?.length) {
-      await supabase.from('queue').update({ status: 'cancelled' }).in('id', staleEntries.map(e => e.id));
-      await supabase.from('presence').update({ status: 'online' }).in('profile_id', staleEntries.map(e => e.profile_id));
+      await supabase.from('queue').update({ status: 'cancelled' }).in('id', staleEntries.map((e: any) => e.id));
+      await supabase.from('presence').update({ status: 'online' }).in('profile_id', staleEntries.map((e: any) => e.profile_id));
     }
-
     const { data: waitingUsers } = await supabase.from('queue')
       .select(`id, profile_id, gender_filter, prefer_countries, avoid_countries, last_peer_id, last_5_peers, skip_count, joined_at, profiles!inner (id, gender, country_code, reputation)`)
       .eq('status', 'waiting').gte('last_heartbeat', new Date(Date.now() - 30_000).toISOString()).order('joined_at', { ascending: true });
-
     if (!waitingUsers || waitingUsers.length < 2) return;
-
-    const allProfileIds = waitingUsers.map(u => u.profile_id);
+    const allProfileIds = waitingUsers.map((u: any) => u.profile_id);
     const { data: allBlocks } = await supabase.from('blocks').select('blocker_id, blocked_id').or(`blocker_id.in.(${allProfileIds.join(',')}),blocked_id.in.(${allProfileIds.join(',')})`);
     const blockSet = new Set<string>();
-    allBlocks?.forEach(b => { blockSet.add(`${b.blocker_id}|${b.blocked_id}`); blockSet.add(`${b.blocked_id}|${b.blocker_id}`); });
+    allBlocks?.forEach((b: any) => { blockSet.add(`${b.blocker_id}|${b.blocked_id}`); blockSet.add(`${b.blocked_id}|${b.blocker_id}`); });
     const isBlocked = (a: string, b: string) => blockSet.has(`${a}|${b}`);
-
     const scoredPairs: ScoredPair[] = [];
     const now = Date.now();
     for (let i = 0; i < waitingUsers.length; i++) {
@@ -56,8 +51,7 @@ async function matchWorker() {
         const pA = Array.isArray(A.profiles) ? A.profiles[0] : A.profiles;
         const pB = Array.isArray(B.profiles) ? B.profiles[0] : B.profiles;
         const breakdown: Record<string, number> = {}; let reason = 'base';
-        if (A.profile_id === B.profile_id) continue;
-        if (isBlocked(A.profile_id, B.profile_id)) continue;
+        if (A.profile_id === B.profile_id || isBlocked(A.profile_id, B.profile_id)) continue;
         if (A.last_peer_id === B.profile_id || B.last_peer_id === A.profile_id) continue;
         if (A.last_5_peers?.includes(B.profile_id) || B.last_5_peers?.includes(A.profile_id)) continue;
         if (A.gender_filter !== 'all' && pB.gender !== A.gender_filter) continue;
@@ -67,31 +61,26 @@ async function matchWorker() {
         if (pA.reputation < 20 && pB.reputation > 60) continue;
         if (pB.reputation < 20 && pA.reputation > 60) continue;
         let score = 100;
-        if (A.prefer_countries?.length && A.prefer_countries.includes(pB.country_code)) { score += 50; breakdown['a_prefers_b'] = 50; reason = 'country_preferred'; }
-        if (B.prefer_countries?.length && B.prefer_countries.includes(pA.country_code)) { score += 50; breakdown['b_prefers_a'] = 50; reason = 'country_preferred'; }
-        if (pA.country_code === pB.country_code) { score += 30; breakdown['same_country'] = 30; if (reason === 'base') reason = 'same_country'; }
-        if (breakdown['a_prefers_b'] && breakdown['b_prefers_a']) { score += 40; breakdown['mutual'] = 40; reason = 'mutual_country'; }
-        if (B.gender_filter !== 'all' && pA.gender === B.gender_filter) { score += 15; breakdown['a_matches_b'] = 15; }
-        if (A.gender_filter !== 'all' && pB.gender === A.gender_filter) { score += 15; breakdown['b_matches_a'] = 15; }
-        const repDiff = Math.abs(pA.reputation - pB.reputation);
-        if (repDiff < 10) { score += 25; breakdown['rep'] = 25; } else if (repDiff < 20) { score += 15; breakdown['rep'] = 15; } else if (repDiff < 35) { score += 5; breakdown['rep'] = 5; }
-        const waitA = Math.floor((now - new Date(A.joined_at).getTime()) / 1000);
-        const waitB = Math.floor((now - new Date(B.joined_at).getTime()) / 1000);
-        if (waitA > 10 && waitB > 10) { score += 20; breakdown['wait'] = 20; }
-        if (waitA > 20 || waitB > 20) { score += 15; breakdown['urgent'] = 15; }
-        if (waitA > 30 || waitB > 30) { score += 30; breakdown['critical'] = 30; reason = 'urgent_timeout'; }
-        if (A.skip_count > 5 || B.skip_count > 5) { score -= 10; breakdown['skip_pen'] = -10; }
-        if (pA.reputation < 40) { const p = -Math.floor((40 - pA.reputation) / 2); score += p; breakdown['a_rep_pen'] = p; }
-        if (pB.reputation < 40) { const p = -Math.floor((40 - pB.reputation) / 2); score += p; breakdown['b_rep_pen'] = p; }
-        const noFiltersA = A.gender_filter === 'all' && !A.prefer_countries?.length && !A.avoid_countries?.length;
-        const noFiltersB = B.gender_filter === 'all' && !B.prefer_countries?.length && !B.avoid_countries?.length;
-        if (noFiltersA && noFiltersB) { score += 10; breakdown['no_filters'] = 10; }
+        if (A.prefer_countries?.length && A.prefer_countries.includes(pB.country_code)) { score += 50; breakdown['a_p'] = 50; reason = 'country_preferred'; }
+        if (B.prefer_countries?.length && B.prefer_countries.includes(pA.country_code)) { score += 50; breakdown['b_p'] = 50; reason = 'country_preferred'; }
+        if (pA.country_code === pB.country_code) { score += 30; breakdown['same'] = 30; if (reason === 'base') reason = 'same_country'; }
+        if (breakdown['a_p'] && breakdown['b_p']) { score += 40; breakdown['mutual'] = 40; reason = 'mutual_country'; }
+        if (B.gender_filter !== 'all' && pA.gender === B.gender_filter) { score += 15; breakdown['am'] = 15; }
+        if (A.gender_filter !== 'all' && pB.gender === A.gender_filter) { score += 15; breakdown['bm'] = 15; }
+        const rd = Math.abs(pA.reputation - pB.reputation);
+        score += rd < 10 ? 25 : rd < 20 ? 15 : rd < 35 ? 5 : 0;
+        const wA = Math.floor((now - new Date(A.joined_at).getTime()) / 1000);
+        const wB = Math.floor((now - new Date(B.joined_at).getTime()) / 1000);
+        if (wA > 10 && wB > 10) score += 20;
+        if (wA > 20 || wB > 20) score += 15;
+        if (wA > 30 || wB > 30) { score += 30; reason = 'urgent_timeout'; }
+        if (A.skip_count > 5 || B.skip_count > 5) score -= 10;
+        if (pA.reputation < 40) score += -Math.floor((40 - pA.reputation) / 2);
+        if (pB.reputation < 40) score += -Math.floor((40 - pB.reputation) / 2);
         score += Math.floor(Math.random() * 8);
-        score = Math.max(score, 1);
-        scoredPairs.push({ userA: A, userB: B, score, breakdown, reason });
+        scoredPairs.push({ userA: A, userB: B, score: Math.max(score, 1), breakdown, reason });
       }
     }
-
     scoredPairs.sort((a, b) => b.score - a.score);
     const matched = new Set<string>(); const finalMatches: ScoredPair[] = [];
     for (const pair of scoredPairs) {
@@ -99,7 +88,6 @@ async function matchWorker() {
       finalMatches.push(pair); matched.add(pair.userA.profile_id); matched.add(pair.userB.profile_id);
       if (finalMatches.length >= 50 || Date.now() - startTime > 1500) break;
     }
-
     for (const match of finalMatches) {
       try {
         const roomRes = await fetch('https://api.daily.co/v1/rooms', {
@@ -111,18 +99,19 @@ async function matchWorker() {
         const room = await roomRes.json();
         const pA = Array.isArray(match.userA.profiles) ? match.userA.profiles[0] : match.userA.profiles;
         const pB = Array.isArray(match.userB.profiles) ? match.userB.profiles[0] : match.userB.profiles;
-        const tokenA = await createMeetingToken(room.name, pA.alias || 'Guest');
-        const tokenB = await createMeetingToken(room.name, pB.alias || 'Guest');
-        await supabase.from('rooms').insert({ daily_room_name: room.name, daily_room_url: room.url, participant_1: match.userA.profile_id, participant_2: match.userB.profile_id, match_score: match.score, match_reason: match.reason });
-        await supabase.from('queue').update({ status: 'matched', room_url: room.url, room_token: tokenA, matched_at: new Date().toISOString(), matched_peer_id: match.userB.profile_id }).eq('id', match.userA.id);
-        await supabase.from('queue').update({ status: 'matched', room_url: room.url, room_token: tokenB, matched_at: new Date().toISOString(), matched_peer_id: match.userA.profile_id }).eq('id', match.userB.id);
-        await supabase.from('presence').update({ status: 'in_call' }).in('profile_id', [match.userA.profile_id, match.userB.profile_id]);
-        const waitA2 = Math.floor((Date.now() - new Date(match.userA.joined_at).getTime()) / 1000);
-        const waitB2 = Math.floor((Date.now() - new Date(match.userB.joined_at).getTime()) / 1000);
-        await supabase.from('match_logs').insert({ user_a: match.userA.profile_id, user_b: match.userB.profile_id, score: match.score, score_breakdown: match.breakdown, wait_time_a_seconds: waitA2, wait_time_b_seconds: waitB2, filters_a: { gender: match.userA.gender_filter }, filters_b: { gender: match.userB.gender_filter } });
+        const [tokenA, tokenB] = await Promise.all([createMeetingToken(room.name, pA.alias || 'Guest'), createMeetingToken(room.name, pB.alias || 'Guest')]);
+        const supabase2 = createServiceClient();
+        await supabase2.from('rooms').insert({ daily_room_name: room.name, daily_room_url: room.url, participant_1: match.userA.profile_id, participant_2: match.userB.profile_id, match_score: match.score, match_reason: match.reason });
+        await supabase2.from('queue').update({ status: 'matched', room_url: room.url, room_token: tokenA, matched_at: new Date().toISOString(), matched_peer_id: match.userB.profile_id }).eq('id', match.userA.id);
+        await supabase2.from('queue').update({ status: 'matched', room_url: room.url, room_token: tokenB, matched_at: new Date().toISOString(), matched_peer_id: match.userA.profile_id }).eq('id', match.userB.id);
+        await supabase2.from('presence').update({ status: 'in_call' }).in('profile_id', [match.userA.profile_id, match.userB.profile_id]);
+        const wA2 = Math.floor((Date.now() - new Date(match.userA.joined_at).getTime()) / 1000);
+        const wB2 = Math.floor((Date.now() - new Date(match.userB.joined_at).getTime()) / 1000);
+        await supabase2.from('match_logs').insert({ user_a: match.userA.profile_id, user_b: match.userB.profile_id, score: match.score, score_breakdown: match.breakdown, wait_time_a_seconds: wA2, wait_time_b_seconds: wB2 });
       } catch (err: any) {
-        console.error('Match room creation failed:', err);
-        await supabase.from('queue').update({ status: 'waiting' }).in('id', [match.userA.id, match.userB.id]);
+        console.error('Room creation failed:', err.message);
+        const s = createServiceClient();
+        await s.from('queue').update({ status: 'waiting' }).in('id', [match.userA.id, match.userB.id]);
       }
     }
   } catch (err) { console.error('matchWorker error:', err); }
@@ -137,29 +126,37 @@ async function cleanupStale() {
     await supabase.from('rooms').update({ ended_at: now.toISOString() }).is('ended_at', null).lt('started_at', new Date(now.getTime() - 3600_000).toISOString());
     await supabase.from('presence').update({ status: 'offline' }).neq('status', 'offline').lt('last_heartbeat', new Date(now.getTime() - 60_000).toISOString());
     await supabase.from('queue_cooldowns').delete().lt('cooldown_until', now.toISOString());
-  } catch (err) { console.error('cleanupStale error:', err); }
+  } catch (err) { console.error('cleanupStale:', err); }
 }
 
-// ── ROUTES ──
+// ── Country detection (server-side, no CORS) ──
+app.get('/api/country', async (_req, res) => {
+  try {
+    const r = await fetch('https://ipworld.info/api/ip/self_country');
+    if (r.ok) { const t = await r.text(); if (t.trim().length === 2) return res.json({ country: t.trim().toUpperCase() }); }
+  } catch {}
+  try {
+    const r2 = await fetch('https://ip2c.org/self');
+    const t2 = await r2.text();
+    if (t2.startsWith('1;')) return res.json({ country: t2.split(';')[1] });
+  } catch {}
+  return res.json({ country: 'US' });
+});
 
 app.post('/api/sync-profile', async (req, res) => {
   try {
     const { alias, countryCode, gender } = req.body;
-    if (!alias) return res.status(400).json({ error: 'Alias is required' });
+    if (!alias) return res.status(400).json({ error: 'Alias required' });
     const supabase = createServiceClient();
     let { data: profile } = await supabase.from('profiles').select('*').eq('alias', alias).maybeSingle();
     if (!profile) {
-      const { data: newProfile, error } = await supabase.from('profiles').insert({ alias, country_code: countryCode || null, gender: gender || null, is_guest: true }).select().single();
-      if (error) throw error;
-      profile = newProfile;
+      const { data: np, error } = await supabase.from('profiles').insert({ alias, country_code: countryCode || null, gender: gender || null, is_guest: true }).select().single();
+      if (error) throw error; profile = np;
     } else {
-      const updates: any = {};
-      if (countryCode && profile.country_code !== countryCode) updates.country_code = countryCode;
-      if (gender !== undefined && profile.gender !== gender) updates.gender = gender;
-      if (Object.keys(updates).length) {
-        const { data: updated } = await supabase.from('profiles').update(updates).eq('id', profile.id).select().single();
-        if (updated) profile = updated;
-      }
+      const u: any = {};
+      if (countryCode && profile.country_code !== countryCode) u.country_code = countryCode;
+      if (gender !== undefined && profile.gender !== gender) u.gender = gender;
+      if (Object.keys(u).length) { const { data: up } = await supabase.from('profiles').update(u).eq('id', profile.id).select().single(); if (up) profile = up; }
     }
     return res.json(profile);
   } catch (err: any) { res.status(500).json({ error: err.message }); }
@@ -170,16 +167,22 @@ app.post('/api/enqueue', async (req, res) => {
     const { profileId, genderFilter = 'all', preferCountries = [], avoidCountries = [] } = req.body;
     const supabase = createServiceClient();
     const { data: cooldown } = await supabase.from('queue_cooldowns').select('cooldown_until, reason').eq('profile_id', profileId).gt('cooldown_until', new Date().toISOString()).single();
-    if (cooldown) { const r = Math.ceil((new Date(cooldown.cooldown_until).getTime() - Date.now()) / 1000); return res.status(429).json({ error: 'cooldown_active', reason: cooldown.reason, remainingSeconds: r }); }
-    const { data: existing } = await supabase.from('queue').select('id').eq('profile_id', profileId).eq('status', 'waiting').single();
-    if (existing) return res.status(409).json({ error: 'already_in_queue' });
-    const { data: activeRoom } = await supabase.from('rooms').select('id').or(`participant_1.eq.${profileId},participant_2.eq.${profileId}`).is('ended_at', null).single();
+    if (cooldown) { const r = Math.ceil((new Date(cooldown.cooldown_until).getTime() - Date.now()) / 1000); return res.status(429).json({ error: 'cooldown_active', remainingSeconds: r }); }
+
+    // If already in queue, return existing entry (don't reject)
+    const { data: existing } = await supabase.from('queue').select('id').eq('profile_id', profileId).eq('status', 'waiting').maybeSingle();
+    if (existing) {
+      matchWorker().catch(console.error);
+      return res.json({ queueId: existing.id, status: 'waiting' });
+    }
+
+    const { data: activeRoom } = await supabase.from('rooms').select('id').or(`participant_1.eq.${profileId},participant_2.eq.${profileId}`).is('ended_at', null).maybeSingle();
     if (activeRoom) return res.status(409).json({ error: 'already_in_call' });
     const { data: lastCalls } = await supabase.from('call_history').select('peer_id').eq('owner_id', profileId).order('called_at', { ascending: false }).limit(5);
     const last5Peers = lastCalls?.map((c: any) => c.peer_id).filter(Boolean) || [];
     const oneHourAgo = new Date(Date.now() - 3600000).toISOString();
-    const { count: recentSearches } = await supabase.from('queue').select('id', { count: 'exact', head: true }).eq('profile_id', profileId).gte('joined_at', oneHourAgo);
-    if ((recentSearches || 0) >= 30) {
+    const { count: rc } = await supabase.from('queue').select('id', { count: 'exact', head: true }).eq('profile_id', profileId).gte('joined_at', oneHourAgo);
+    if ((rc || 0) >= 30) {
       await supabase.from('queue_cooldowns').upsert({ profile_id: profileId, reason: 'search_spam', cooldown_until: new Date(Date.now() + 5 * 60000).toISOString() });
       return res.status(429).json({ error: 'rate_limited', remainingSeconds: 300 });
     }
@@ -203,13 +206,14 @@ app.post('/api/heartbeat', async (req, res) => {
 app.post('/api/dequeue', async (req, res) => {
   try {
     const { profileId, queueId } = req.body; const supabase = createServiceClient();
-    await supabase.from('queue').update({ status: 'cancelled' }).eq('id', queueId).eq('profile_id', profileId).eq('status', 'waiting');
+    if (queueId) await supabase.from('queue').update({ status: 'cancelled' }).eq('id', queueId).eq('profile_id', profileId);
+    else await supabase.from('queue').update({ status: 'cancelled' }).eq('profile_id', profileId).eq('status', 'waiting');
     await supabase.from('presence').update({ status: 'online', last_heartbeat: new Date().toISOString() }).eq('profile_id', profileId);
     return res.json({ ok: true });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/online-count', async (req, res) => {
+app.get('/api/online-count', async (_req, res) => {
   try {
     const supabase = createServiceClient();
     const { count } = await supabase.from('presence').select('*', { count: 'exact', head: true }).neq('status', 'offline');
@@ -220,20 +224,16 @@ app.get('/api/online-count', async (req, res) => {
 app.get('/api/friends/:profileId', async (req, res) => {
   try {
     const { profileId } = req.params; const supabase = createServiceClient();
-    const { data: friendsList } = await supabase.from('friends').select('friend_id, nickname').eq('owner_id', profileId);
-    if (!friendsList?.length) return res.json([]);
-    const friendIds = friendsList.map((f: any) => f.friend_id);
+    const { data: fl } = await supabase.from('friends').select('friend_id, nickname').eq('owner_id', profileId);
+    if (!fl?.length) return res.json([]);
+    const ids = fl.map((f: any) => f.friend_id);
     const [{ data: profiles }, { data: presences }] = await Promise.all([
-      supabase.from('profiles').select('id, alias, country_code, gender').in('id', friendIds),
-      supabase.from('presence').select('profile_id, status').in('profile_id', friendIds),
+      supabase.from('profiles').select('id, alias, country_code, gender').in('id', ids),
+      supabase.from('presence').select('profile_id, status').in('profile_id', ids),
     ]);
-    const profileMap = new Map(profiles?.map((p: any) => [p.id, p]) || []);
-    const presenceMap = new Map(presences?.map((p: any) => [p.profile_id, p.status]) || []);
-    const friends = friendsList.map((f: any) => {
-      const profile: any = profileMap.get(f.friend_id);
-      return { id: f.friend_id, alias: profile?.alias || 'Unknown', nickname: f.nickname, country: profile?.country_code || null, gender: profile?.gender || null, status: presenceMap.get(f.friend_id) || 'offline' };
-    });
-    return res.json(friends);
+    const pm = new Map(profiles?.map((p: any) => [p.id, p]) || []);
+    const prm = new Map(presences?.map((p: any) => [p.profile_id, p.status]) || []);
+    return res.json(fl.map((f: any) => { const p: any = pm.get(f.friend_id); return { id: f.friend_id, alias: p?.alias || 'Unknown', nickname: f.nickname, country: p?.country_code || null, gender: p?.gender || null, status: prm.get(f.friend_id) || 'offline' }; }));
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 
@@ -255,7 +255,7 @@ app.post('/api/friends/:profileId/remove', async (req, res) => {
 
 app.get('/api/cron/match', async (_req, res) => {
   await Promise.all([matchWorker(), cleanupStale()]);
-  res.json({ ok: true, ts: new Date().toISOString() });
+  res.json({ ok: true });
 });
 
 export default app;
