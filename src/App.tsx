@@ -6,11 +6,13 @@ import { Friends } from './pages/Friends';
 import { History } from './pages/History';
 import { Settings } from './components/layout/Settings';
 import { useAppStore } from './store/useAppStore';
+import { useCallStore } from './store/useCallStore';
 import { genDeviceAlias } from './lib/fingerprint';
 import { useMatchmaking } from './hooks/useMatchmaking';
 import { useCall } from './hooks/useCall';
+import { IncomingRequestPopup } from './components/call/IncomingRequestPopup';
+import { getCallSession, clearCallSession } from './lib/callSession';
 
-// Component to run global hooks without breaking React Router setup
 function GlobalHooks() {
   useMatchmaking();
   useCall();
@@ -18,12 +20,32 @@ function GlobalHooks() {
 }
 
 export default function App() {
-  const { alias, setAlias, setCountryCode, gender, setGender, countryCode } = useAppStore();
+  const { alias, setAlias, setCountryCode, gender, setGender, countryCode, setProfileId } = useAppStore();
+  const { setCallState, setRoomDetails, setPeerDetails, setCallDurationBase } = useCallStore();
   const [showGenderModal, setShowGenderModal] = React.useState(false);
-  const [profileSynced, setProfileSynced] = React.useState(false);
+
+  // Session recovery on mount
+  useEffect(() => {
+    const session = getCallSession();
+    if (session?.disconnectedAt) {
+      const age = Date.now() - session.disconnectedAt;
+      if (age < 30000) {
+        setPeerDetails({
+          id: session.peerId,
+          alias: session.peerAlias,
+          country: session.peerCountry,
+          gender: session.peerGender,
+        });
+        setRoomDetails({ id: session.roomId, url: session.roomUrl, token: session.roomToken });
+        setCallDurationBase(session.elapsedSeconds);
+        setCallState('connecting');
+      } else {
+        clearCallSession();
+      }
+    }
+  }, []);
 
   useEffect(() => {
-    // 1. Alias Generation
     let currentAlias = alias;
     if (!currentAlias) {
       currentAlias = genDeviceAlias();
@@ -34,60 +56,55 @@ export default function App() {
       setShowGenderModal(true);
     }
 
-    // 2. Country detection
     const detectCountry = async () => {
       let finalCountry = 'US';
       try {
-        const r = await fetch('https://ipworld.info/api/ip/self_country'); // returns "US" directly
+        const r = await fetch('https://ipworld.info/api/ip/self_country');
         if (r.ok) {
-           const d = await r.text();
-           if (d && d.trim().length === 2) finalCountry = d.trim().toUpperCase();
+          const d = await r.text();
+          if (d && d.trim().length === 2) finalCountry = d.trim().toUpperCase();
         }
-      } catch (e) {
+      } catch {
         try {
-          const r0 = await fetch('https://ip2c.org/self');
-          const d0 = await r0.text();
-          if (d0 && d0.startsWith('1;')) {
-            const code = d0.split(';')[1];
-            if (code) finalCountry = code;
-          }
-        } catch (e) {
-           finalCountry = navigator.language.split('-')[1]?.toUpperCase() || navigator.language.substring(0, 2).toUpperCase() || 'US';
-        }
+          const r2 = await fetch('https://ip2c.org/self');
+          const d2 = await r2.text();
+          if (d2?.startsWith('1;')) finalCountry = d2.split(';')[1] || 'US';
+        } catch {}
       }
       setCountryCode(finalCountry);
-      
-      // Sync DB Profile
+
       try {
-        await fetch('/api/sync-profile', {
+        const res = await fetch('/api/sync-profile', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ alias: currentAlias, countryCode: finalCountry, gender })
+          body: JSON.stringify({ alias: currentAlias, countryCode: finalCountry, gender }),
         });
-        setProfileSynced(true);
-      } catch (e) {
-         console.error(e);
-         // Fallback allow app to load
-         setProfileSynced(true);
-      }
+        if (res.ok) {
+          const profile = await res.json();
+          if (profile?.id) setProfileId(profile.id);
+        }
+      } catch {}
     };
+
     detectCountry();
-  }, [alias, setAlias, setCountryCode]);
+  }, [alias]);
 
   useEffect(() => {
-    // If gender changes later (e.g. from modal), sync again to save
-    if (profileSynced && alias) {
-       fetch('/api/sync-profile', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ alias, countryCode, gender })
-       }).catch(() => {});
-    }
-  }, [gender, profileSynced]);
+    if (!alias) return;
+    fetch('/api/sync-profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ alias, countryCode, gender }),
+    })
+      .then((r) => r.ok && r.json())
+      .then((p) => { if (p?.id) setProfileId(p.id); })
+      .catch(() => {});
+  }, [gender]);
 
   return (
     <HashRouter>
       <GlobalHooks />
+      <IncomingRequestPopup />
       <Routes>
         <Route element={<AppShell />}>
           <Route path="/" element={<Home />} />
@@ -103,20 +120,20 @@ export default function App() {
             <h2 className="text-xl font-bold mb-2">Welcome!</h2>
             <p className="text-zinc-400 text-sm mb-6">Before you start connecting, what's your gender?</p>
             <div className="flex gap-2 justify-center mb-6">
-              <button 
+              <button
                 onClick={() => { setGender('male'); setShowGenderModal(false); localStorage.setItem('whisper_gender_prompted', 'true'); }}
                 className="flex-1 py-3 bg-zinc-900 border border-zinc-800 hover:border-orange-500 hover:bg-orange-500/10 rounded-xl transition-all font-medium flex flex-col items-center gap-1"
               >
                 <span className="text-2xl">👨</span> Male
               </button>
-              <button 
+              <button
                 onClick={() => { setGender('female'); setShowGenderModal(false); localStorage.setItem('whisper_gender_prompted', 'true'); }}
                 className="flex-1 py-3 bg-zinc-900 border border-zinc-800 hover:border-orange-500 hover:bg-orange-500/10 rounded-xl transition-all font-medium flex flex-col items-center gap-1"
               >
                 <span className="text-2xl">👩</span> Female
               </button>
             </div>
-            <button 
+            <button
               onClick={() => { setShowGenderModal(false); localStorage.setItem('whisper_gender_prompted', 'true'); }}
               className="text-zinc-500 hover:text-zinc-300 text-sm underline underline-offset-4"
             >
