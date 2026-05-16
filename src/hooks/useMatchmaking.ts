@@ -10,10 +10,12 @@ export function useMatchmaking() {
   const { genderFilter, preferCountries, blockCountries } = useFilterStore();
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const queueIdRef = useRef<string | null>(null);
+  const matchHandledRef = useRef(false);
 
   useEffect(() => {
     let active = true;
     let realtimeChannel: any = null;
+    matchHandledRef.current = false;
 
     const getOrCreateProfile = async () => {
       const { data: profile } = await supabase
@@ -28,19 +30,26 @@ export function useMatchmaking() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ alias, countryCode, gender }),
       });
-      if (res.ok) {
-        const p = await res.json();
-        return { id: p.id };
-      }
+      if (res.ok) return { id: (await res.json()).id };
       return null;
     };
 
-    const handleMatchPayload = async (row: any) => {
-      if (!active) return;
-      setCallState('connecting');
+    const handleMatch = async (data: { id?: string; queueId?: string; room_url?: string; roomUrl?: string; room_token?: string; roomToken?: string; matched_peer_id?: string; matchedPeerId?: string }) => {
+      if (!active || matchHandledRef.current) return;
+      matchHandledRef.current = true;
 
-      const matchedPeerId = row.matched_peer_id;
-      if (!matchedPeerId) return;
+      const roomId = data.id || data.queueId || queueIdRef.current || '';
+      const roomUrl = data.room_url || data.roomUrl || '';
+      const roomToken = data.room_token || data.roomToken || '';
+      const matchedPeerId = data.matched_peer_id || data.matchedPeerId || '';
+
+      if (!roomUrl || !roomToken || !matchedPeerId) {
+        console.error('[matchmaking] handleMatch called with incomplete data', data);
+        matchHandledRef.current = false;
+        return;
+      }
+
+      setCallState('connecting');
 
       const { data: peerData } = await supabase
         .from('profiles')
@@ -55,11 +64,7 @@ export function useMatchmaking() {
         gender: peerData?.gender || null,
       });
 
-      setRoomDetails({
-        id: row.id,
-        url: row.room_url,
-        token: row.room_token,
-      });
+      setRoomDetails({ id: roomId, url: roomUrl, token: roomToken });
     };
 
     const startSearching = async () => {
@@ -67,15 +72,15 @@ export function useMatchmaking() {
         const profile = await getOrCreateProfile();
         if (!profile || !active) return;
 
-        // Subscribe BEFORE enqueuing — match may happen during enqueue response
+        // Subscribe to Realtime BEFORE enqueue (fast path — fires if WebSocket is ready)
         realtimeChannel = supabase
-          .channel(`queue-${profile.id}`)
+          .channel(`queue-match-${profile.id}`)
           .on(
             'postgres_changes',
             { event: 'UPDATE', schema: 'public', table: 'queue', filter: `profile_id=eq.${profile.id}` },
             async (payload) => {
               if (payload.new.status === 'matched') {
-                await handleMatchPayload(payload.new);
+                await handleMatch(payload.new);
               }
             }
           )
@@ -84,17 +89,12 @@ export function useMatchmaking() {
         const enqueueRes = await fetch('/api/enqueue', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            profileId: profile.id,
-            genderFilter,
-            preferCountries,
-            avoidCountries: blockCountries,
-          }),
+          body: JSON.stringify({ profileId: profile.id, genderFilter, preferCountries, avoidCountries: blockCountries }),
         });
 
         if (!enqueueRes.ok) {
           const err = await enqueueRes.json();
-          console.error('Queue error:', err);
+          console.error('[matchmaking] enqueue error:', err);
           if (active) setCallState('idle');
           return;
         }
@@ -102,40 +102,43 @@ export function useMatchmaking() {
         const enqueueData = await enqueueRes.json();
         queueIdRef.current = enqueueData.queueId;
 
-        // Check current status immediately — match may have happened during enqueue
-        // and the Realtime event may have fired before subscribe() was fully active
-        const { data: currentEntry } = await supabase
-          .from('queue')
-          .select('id, status, room_url, room_token, matched_peer_id')
-          .eq('id', enqueueData.queueId)
-          .maybeSingle();
-
-        if (currentEntry?.status === 'matched' && active) {
-          await handleMatchPayload(currentEntry);
+        // Enqueue response includes match data if matchWorker already matched us
+        if (enqueueData.status === 'matched') {
+          await handleMatch(enqueueData);
           return;
         }
 
-        // Still waiting — start heartbeat
-        heartbeatIntervalRef.current = setInterval(() => {
-          fetch('/api/heartbeat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ profileId: profile.id, queueId: queueIdRef.current }),
-          }).catch(console.error);
-        }, 10000);
+        // Start heartbeat — polls queue status every 8s as fallback if Realtime missed the event
+        heartbeatIntervalRef.current = setInterval(async () => {
+          if (!active || matchHandledRef.current) return;
+          try {
+            const hbRes = await fetch('/api/heartbeat', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ profileId: profile.id, queueId: queueIdRef.current }),
+            });
+            if (hbRes.ok) {
+              const hbData = await hbRes.json();
+              if (hbData.status === 'matched') {
+                await handleMatch({
+                  queueId: queueIdRef.current || '',
+                  roomUrl: hbData.roomUrl,
+                  roomToken: hbData.roomToken,
+                  matchedPeerId: hbData.matchedPeerId,
+                });
+              }
+            }
+          } catch (e) { console.error('[matchmaking] heartbeat error:', e); }
+        }, 8000);
       } catch (err) {
-        console.error('startSearching error:', err);
+        console.error('[matchmaking] startSearching error:', err);
         if (active) setCallState('idle');
       }
     };
 
     const cleanupQueue = async () => {
       if (!alias) return;
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('id')
-        .eq('alias', alias)
-        .maybeSingle();
+      const { data: profile } = await supabase.from('profiles').select('id').eq('alias', alias).maybeSingle();
       if (profile) {
         await fetch('/api/dequeue', {
           method: 'POST',

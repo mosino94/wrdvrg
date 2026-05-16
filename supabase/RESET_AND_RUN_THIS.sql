@@ -86,7 +86,7 @@ create table presence (
   last_heartbeat timestamptz default now()
 );
 
--- MATCHMAKING QUEUE (with all required columns)
+-- MATCHMAKING QUEUE
 create table queue (
   id uuid primary key default gen_random_uuid(),
   profile_id uuid references profiles(id) on delete cascade,
@@ -106,6 +106,9 @@ create table queue (
 );
 create index idx_queue_status on queue(status, joined_at);
 create index idx_queue_profile on queue(profile_id);
+
+-- Needed for Realtime row-level filter to work on UPDATE events
+alter table queue replica identity full;
 
 -- VOICE ROOMS
 create table rooms (
@@ -255,22 +258,20 @@ alter table match_logs enable row level security;
 -- Step 4: RLS Policies
 -- PROFILES: Anyone can read (needed to fetch peer info after match)
 create policy "Anyone can read profiles" on profiles for select using (true);
--- Insert/update only via service_role (backend API)
 create policy "Service role insert profiles" on profiles for insert with check (false);
 create policy "Service role update profiles" on profiles for update using (false);
 
--- PRESENCE: Anyone can read (show online users)
+-- PRESENCE: Anyone can read
 create policy "Anyone read presence" on presence for select using (true);
 create policy "Service role manage presence" on presence for all with check (false);
 
--- QUEUE: Anyone can SELECT (needed for Realtime subscriptions - guests have no auth.uid())
+-- QUEUE: Anyone can SELECT (needed for Realtime + direct polling by guests)
 create policy "Anyone can read queue" on queue for select using (true);
--- Only service_role can write (backend API uses service_role key)
 create policy "Service role insert queue" on queue for insert with check (false);
 create policy "Service role update queue" on queue for update using (false);
 create policy "Service role delete queue" on queue for delete using (false);
 
--- ROOMS: Anyone can read (to check active call)
+-- ROOMS: Anyone can read
 create policy "Anyone read rooms" on rooms for select using (true);
 create policy "Service role manage rooms" on rooms for all with check (false);
 
@@ -280,7 +281,7 @@ create policy "Users read own friends" on friends for all using (owner_id = auth
 -- FRIEND REQUESTS
 create policy "Users read own friend requests" on friend_requests for select using (sender_id = auth.uid() or receiver_id = auth.uid());
 
--- CALL HISTORY: Only own records
+-- CALL HISTORY
 create policy "Users read own history" on call_history for select using (owner_id = auth.uid());
 create policy "Service role manage history" on call_history for all with check (false);
 
@@ -291,7 +292,7 @@ create policy "Users read own blocks" on blocks for all using (blocker_id = auth
 create policy "Users read own reports" on reports for select using (reporter_id = auth.uid());
 create policy "Service role manage reports" on reports for all with check (false);
 
--- Admin-only tables (service_role bypasses RLS)
+-- Admin-only tables
 create policy "No direct access" on moderation_logs for all using (false);
 create policy "No direct access" on recovery_attempts for all using (false);
 create policy "No direct access" on match_logs for all using (false);

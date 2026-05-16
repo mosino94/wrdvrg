@@ -16,10 +16,12 @@ async function createMeetingToken(roomName: string, userName: string) {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.DAILY_API_KEY || ''}` },
     body: JSON.stringify({ properties: { room_name: roomName, user_name: userName, exp: Math.floor(Date.now() / 1000) + 3600, is_owner: false, enable_screenshare: false } }),
   });
-  return (await res.json()).token;
+  const json = await res.json();
+  if (!res.ok) throw new Error('Token error: ' + JSON.stringify(json));
+  return json.token as string;
 }
 
-interface ScoredPair { userA: any; userB: any; score: number; breakdown: Record<string, number>; reason: string; }
+interface ScoredPair { userA: any; userB: any; score: number; reason: string; }
 
 async function matchWorker() {
   try {
@@ -34,24 +36,21 @@ async function matchWorker() {
       await supabase.from('presence').update({ status: 'online' }).in('profile_id', staleEntries.map((e: any) => e.profile_id));
     }
 
-    // Fetch waiting users with their profiles
-    const { data: waitingUsers } = await supabase.from('queue')
+    const { data: waitingUsers, error: wErr } = await supabase.from('queue')
       .select(`id, profile_id, gender_filter, prefer_countries, avoid_countries, last_peer_id, last_5_peers, skip_count, joined_at, profiles!inner (id, gender, country_code, reputation)`)
       .eq('status', 'waiting')
       .gte('last_heartbeat', new Date(Date.now() - 30_000).toISOString())
       .order('joined_at', { ascending: true });
 
-    console.log('Waiting users:', waitingUsers?.length || 0);
+    console.log('[matchWorker] waiting users:', waitingUsers?.length ?? 0, wErr?.message ?? '');
     if (!waitingUsers || waitingUsers.length < 2) return;
 
-    // Fetch blocks
     const allProfileIds = waitingUsers.map((u: any) => u.profile_id);
     const { data: allBlocks } = await supabase.from('blocks').select('blocker_id, blocked_id')
       .or(`blocker_id.in.(${allProfileIds.join(',')}),blocked_id.in.(${allProfileIds.join(',')})`);
     const blockSet = new Set<string>();
     allBlocks?.forEach((b: any) => { blockSet.add(`${b.blocker_id}|${b.blocked_id}`); blockSet.add(`${b.blocked_id}|${b.blocker_id}`); });
 
-    // Score pairs
     const scoredPairs: ScoredPair[] = [];
     const now = Date.now();
     for (let i = 0; i < waitingUsers.length; i++) {
@@ -62,15 +61,17 @@ async function matchWorker() {
         if (!pA || !pB) continue;
         if (A.profile_id === B.profile_id) continue;
         if (blockSet.has(`${A.profile_id}|${B.profile_id}`)) continue;
-        if (A.last_peer_id === B.profile_id || B.last_peer_id === A.profile_id) continue;
-        if (A.last_5_peers?.includes(B.profile_id) || B.last_5_peers?.includes(A.profile_id)) continue;
+        if (A.last_peer_id && A.last_peer_id === B.profile_id) continue;
+        if (B.last_peer_id && B.last_peer_id === A.profile_id) continue;
+        if (A.last_5_peers?.length && A.last_5_peers.includes(B.profile_id)) continue;
+        if (B.last_5_peers?.length && B.last_5_peers.includes(A.profile_id)) continue;
         if (A.gender_filter !== 'all' && pB.gender !== A.gender_filter) continue;
         if (B.gender_filter !== 'all' && pA.gender !== B.gender_filter) continue;
         if (A.avoid_countries?.length && A.avoid_countries.includes(pB.country_code)) continue;
         if (B.avoid_countries?.length && B.avoid_countries.includes(pA.country_code)) continue;
 
-        let score = 100; const breakdown: Record<string, number> = {}; let reason = 'base';
-        if (pA.country_code === pB.country_code) { score += 30; reason = 'same_country'; }
+        let score = 100; let reason = 'base';
+        if (pA.country_code && pA.country_code === pB.country_code) { score += 30; reason = 'same_country'; }
         const rd = Math.abs((pA.reputation || 50) - (pB.reputation || 50));
         score += rd < 10 ? 25 : rd < 20 ? 15 : rd < 35 ? 5 : 0;
         const wA = Math.floor((now - new Date(A.joined_at).getTime()) / 1000);
@@ -79,24 +80,22 @@ async function matchWorker() {
         if (wA > 20 || wB > 20) score += 15;
         if (wA > 30 || wB > 30) { score += 30; reason = 'urgent'; }
         score += Math.floor(Math.random() * 8);
-        scoredPairs.push({ userA: A, userB: B, score: Math.max(score, 1), breakdown, reason });
+        scoredPairs.push({ userA: A, userB: B, score: Math.max(score, 1), reason });
       }
     }
 
-    if (!scoredPairs.length) { console.log('No valid pairs found'); return; }
+    if (!scoredPairs.length) { console.log('[matchWorker] no valid pairs'); return; }
 
-    // Greedy match
     scoredPairs.sort((a, b) => b.score - a.score);
     const matched = new Set<string>(); const finalMatches: ScoredPair[] = [];
     for (const pair of scoredPairs) {
       if (matched.has(pair.userA.profile_id) || matched.has(pair.userB.profile_id)) continue;
       finalMatches.push(pair); matched.add(pair.userA.profile_id); matched.add(pair.userB.profile_id);
-      if (finalMatches.length >= 10 || Date.now() - startTime > 2000) break;
+      if (finalMatches.length >= 10 || Date.now() - startTime > 3000) break;
     }
 
-    console.log('Creating', finalMatches.length, 'matches');
+    console.log('[matchWorker] creating', finalMatches.length, 'matches');
 
-    // Create rooms
     for (const match of finalMatches) {
       try {
         const roomRes = await fetch('https://api.daily.co/v1/rooms', {
@@ -106,11 +105,11 @@ async function matchWorker() {
         });
         if (!roomRes.ok) {
           const errText = await roomRes.text();
-          console.error('Daily.co error:', errText);
-          throw new Error(errText);
+          console.error('[matchWorker] Daily.co room creation failed:', roomRes.status, errText);
+          continue; // skip this pair, don't reset to waiting — they'll try again on next heartbeat
         }
         const room = await roomRes.json();
-        console.log('Room created:', room.name);
+        console.log('[matchWorker] room created:', room.name);
 
         const pA = Array.isArray(match.userA.profiles) ? match.userA.profiles[0] : match.userA.profiles;
         const pB = Array.isArray(match.userB.profiles) ? match.userB.profiles[0] : match.userB.profiles;
@@ -120,24 +119,22 @@ async function matchWorker() {
         ]);
 
         const supabase2 = createServiceClient();
-        await supabase2.from('rooms').insert({ daily_room_name: room.name, daily_room_url: room.url, participant_1: match.userA.profile_id, participant_2: match.userB.profile_id, match_score: match.score, match_reason: match.reason });
-
+        const now2 = new Date().toISOString();
         const [resA, resB] = await Promise.all([
-          supabase2.from('queue').update({ status: 'matched', room_url: room.url, room_token: tokenA, matched_at: new Date().toISOString(), matched_peer_id: match.userB.profile_id }).eq('id', match.userA.id),
-          supabase2.from('queue').update({ status: 'matched', room_url: room.url, room_token: tokenB, matched_at: new Date().toISOString(), matched_peer_id: match.userA.profile_id }).eq('id', match.userB.id),
+          supabase2.from('queue').update({ status: 'matched', room_url: room.url, room_token: tokenA, matched_at: now2, matched_peer_id: match.userB.profile_id }).eq('id', match.userA.id),
+          supabase2.from('queue').update({ status: 'matched', room_url: room.url, room_token: tokenB, matched_at: now2, matched_peer_id: match.userA.profile_id }).eq('id', match.userB.id),
         ]);
 
-        console.log('Queue updated - A:', resA.error, 'B:', resB.error);
-
+        console.log('[matchWorker] queue update A:', resA.error?.message ?? 'ok', 'B:', resB.error?.message ?? 'ok');
+        await supabase2.from('rooms').insert({ daily_room_name: room.name, daily_room_url: room.url, participant_1: match.userA.profile_id, participant_2: match.userB.profile_id, match_score: match.score, match_reason: match.reason });
         await supabase2.from('presence').update({ status: 'in_call' }).in('profile_id', [match.userA.profile_id, match.userB.profile_id]);
-        console.log('Match complete:', match.userA.profile_id, '<->', match.userB.profile_id);
+        console.log('[matchWorker] matched:', match.userA.profile_id, '<->', match.userB.profile_id);
       } catch (err: any) {
-        console.error('Room creation failed:', err.message);
-        const s = createServiceClient();
-        await s.from('queue').update({ status: 'waiting' }).in('id', [match.userA.id, match.userB.id]);
+        console.error('[matchWorker] room error:', err.message);
+        // Don't reset to waiting — leave them in queue for next attempt
       }
     }
-  } catch (err) { console.error('matchWorker error:', err); }
+  } catch (err) { console.error('[matchWorker] top-level error:', err); }
 }
 
 async function cleanupStale() {
@@ -191,11 +188,18 @@ app.post('/api/enqueue', async (req, res) => {
     const { data: cooldown } = await supabase.from('queue_cooldowns').select('cooldown_until').eq('profile_id', profileId).gt('cooldown_until', new Date().toISOString()).maybeSingle();
     if (cooldown) { const r = Math.ceil((new Date(cooldown.cooldown_until).getTime() - Date.now()) / 1000); return res.status(429).json({ error: 'cooldown_active', remainingSeconds: r }); }
 
-    // Already in queue — return existing and try to match
-    const { data: existing } = await supabase.from('queue').select('id').eq('profile_id', profileId).eq('status', 'waiting').maybeSingle();
+    // Already in queue — run matchWorker and return current status
+    const { data: existing } = await supabase.from('queue').select('id, status, room_url, room_token, matched_peer_id').eq('profile_id', profileId).eq('status', 'waiting').maybeSingle();
     if (existing) {
-      await matchWorker(); // AWAIT — not fire-and-forget
-      return res.json({ queueId: existing.id, status: 'waiting' });
+      await matchWorker();
+      const { data: updated } = await supabase.from('queue').select('id, status, room_url, room_token, matched_peer_id').eq('id', existing.id).maybeSingle();
+      return res.json({
+        queueId: existing.id,
+        status: updated?.status || 'waiting',
+        roomUrl: updated?.room_url || null,
+        roomToken: updated?.room_token || null,
+        matchedPeerId: updated?.matched_peer_id || null,
+      });
     }
 
     const { data: activeRoom } = await supabase.from('rooms').select('id').or(`participant_1.eq.${profileId},participant_2.eq.${profileId}`).is('ended_at', null).maybeSingle();
@@ -212,19 +216,38 @@ app.post('/api/enqueue', async (req, res) => {
     if (error) throw error;
 
     await supabase.from('presence').upsert({ profile_id: profileId, status: 'searching', last_heartbeat: new Date().toISOString() });
+    await matchWorker();
 
-    await matchWorker(); // AWAIT — ensures match completes before response
+    // Return actual status after matchWorker — may be 'matched' already
+    const { data: afterMatch } = await supabase.from('queue').select('status, room_url, room_token, matched_peer_id').eq('id', queueEntry.id).maybeSingle();
 
-    return res.json({ queueId: queueEntry.id, status: 'waiting' });
+    return res.json({
+      queueId: queueEntry.id,
+      status: afterMatch?.status || 'waiting',
+      roomUrl: afterMatch?.room_url || null,
+      roomToken: afterMatch?.room_token || null,
+      matchedPeerId: afterMatch?.matched_peer_id || null,
+    });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/heartbeat', async (req, res) => {
   try {
-    const { profileId, queueId } = req.body; const supabase = createServiceClient(); const now = new Date().toISOString();
+    const { profileId, queueId } = req.body;
+    const supabase = createServiceClient();
+    const now = new Date().toISOString();
     await supabase.from('presence').upsert({ profile_id: profileId, last_heartbeat: now });
-    if (queueId) await supabase.from('queue').update({ last_heartbeat: now }).eq('id', queueId).eq('status', 'waiting');
-    return res.json({ ok: true });
+
+    if (queueId) {
+      // Update heartbeat only if still waiting
+      await supabase.from('queue').update({ last_heartbeat: now }).eq('id', queueId).eq('status', 'waiting');
+      // Always return current status so client can detect a match
+      const { data: entry } = await supabase.from('queue').select('status, room_url, room_token, matched_peer_id').eq('id', queueId).maybeSingle();
+      if (entry?.status === 'matched') {
+        return res.json({ ok: true, status: 'matched', roomUrl: entry.room_url, roomToken: entry.room_token, matchedPeerId: entry.matched_peer_id });
+      }
+    }
+    return res.json({ ok: true, status: 'waiting' });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 
