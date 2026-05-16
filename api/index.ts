@@ -1,5 +1,6 @@
 import express from 'express';
 import { createClient } from '@supabase/supabase-js';
+import { createHmac, randomUUID } from 'crypto';
 
 function createServiceClient() {
   const url = process.env.VITE_SUPABASE_URL || '';
@@ -7,19 +8,25 @@ function createServiceClient() {
   return createClient(url, key);
 }
 
+// Generate a LiveKit JWT token (no extra SDK needed - pure crypto)
+async function createLiveKitToken(room: string, identity: string): Promise<string> {
+  const apiKey = process.env.LIVEKIT_API_KEY || '';
+  const apiSecret = process.env.LIVEKIT_API_SECRET || '';
+  if (!apiKey || !apiSecret) throw new Error('LIVEKIT_API_KEY or LIVEKIT_API_SECRET not set');
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: 'HS256', typ: 'JWT' };
+  const payload = {
+    iss: apiKey, sub: identity, iat: now, exp: now + 3600, nbf: now - 30,
+    video: { room, roomJoin: true, canPublish: true, canSubscribe: true },
+  };
+  const enc = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const input = `${enc(header)}.${enc(payload)}`;
+  const sig = createHmac('sha256', apiSecret).update(input).digest('base64url');
+  return `${input}.${sig}`;
+}
+
 const app = express();
 app.use(express.json());
-
-async function createMeetingToken(roomName: string, userName: string) {
-  const res = await fetch('https://api.daily.co/v1/meeting-tokens', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.DAILY_API_KEY || ''}` },
-    body: JSON.stringify({ properties: { room_name: roomName, user_name: userName, exp: Math.floor(Date.now() / 1000) + 3600, is_owner: false, enable_screenshare: false } }),
-  });
-  const json = await res.json();
-  if (!res.ok) throw new Error('Token error: ' + JSON.stringify(json));
-  return json.token as string;
-}
 
 interface QueueEntry { id: string; profile_id: string; gender_filter: string; prefer_countries: string[]; avoid_countries: string[]; last_peer_id: string | null; last_5_peers: string[]; skip_count: number; joined_at: string; profile?: any; }
 interface ScoredPair { userA: QueueEntry; userB: QueueEntry; score: number; reason: string; }
@@ -38,14 +45,14 @@ async function matchWorker() {
       console.log('[matchWorker] cancelled', staleEntries.length, 'stale entries');
     }
 
-    // Step 1: Get waiting queue entries (no join to avoid ambiguous FK issue)
+    // Step 1: Get waiting queue entries (no join — avoids ambiguous FK issue with 3 FKs to profiles)
     const { data: waitingQueue, error: qErr } = await supabase.from('queue')
       .select('id, profile_id, gender_filter, prefer_countries, avoid_countries, last_peer_id, last_5_peers, skip_count, joined_at')
       .eq('status', 'waiting')
       .gte('last_heartbeat', new Date(Date.now() - 30_000).toISOString())
       .order('joined_at', { ascending: true });
 
-    console.log('[matchWorker] waiting entries:', waitingQueue?.length ?? 0, qErr ? qErr.message : '');
+    console.log('[matchWorker] waiting:', waitingQueue?.length ?? 0, qErr?.message ?? '');
     if (!waitingQueue || waitingQueue.length < 2) return;
 
     // Step 2: Fetch profiles separately
@@ -53,17 +60,11 @@ async function matchWorker() {
     const { data: profiles, error: pErr } = await supabase.from('profiles')
       .select('id, alias, gender, country_code, reputation')
       .in('id', profileIds);
-
-    console.log('[matchWorker] profiles fetched:', profiles?.length ?? 0, pErr ? pErr.message : '');
-
+    console.log('[matchWorker] profiles:', profiles?.length ?? 0, pErr?.message ?? '');
     const profileMap = new Map((profiles || []).map((p: any) => [p.id, p]));
 
     // Step 3: Combine
-    const waitingUsers: QueueEntry[] = (waitingQueue as any[]).map(q => ({
-      ...q,
-      profile: profileMap.get(q.profile_id) || null,
-    })).filter(u => u.profile !== null);
-
+    const waitingUsers: QueueEntry[] = (waitingQueue as any[]).map(q => ({ ...q, profile: profileMap.get(q.profile_id) || null })).filter(u => u.profile !== null);
     console.log('[matchWorker] users with profiles:', waitingUsers.length);
     if (waitingUsers.length < 2) return;
 
@@ -118,36 +119,25 @@ async function matchWorker() {
     }
 
     console.log('[matchWorker] creating', finalMatches.length, 'matches');
+    const livekitUrl = process.env.LIVEKIT_URL || '';
 
     for (const match of finalMatches) {
       try {
-        const roomRes = await fetch('https://api.daily.co/v1/rooms', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.DAILY_API_KEY || ''}` },
-          body: JSON.stringify({ privacy: 'private', properties: { max_participants: 2, exp: Math.floor(Date.now() / 1000) + 3600, enable_chat: false, enable_screenshare: false, audio_only: true } }),
-        });
-        if (!roomRes.ok) {
-          const errText = await roomRes.text();
-          console.error('[matchWorker] Daily.co failed:', roomRes.status, errText);
-          continue;
-        }
-        const room = await roomRes.json();
-        console.log('[matchWorker] room created:', room.name);
-
+        const roomName = `wr-${randomUUID().replace(/-/g, '').slice(0, 16)}`;
         const [tokenA, tokenB] = await Promise.all([
-          createMeetingToken(room.name, match.userA.profile?.alias || 'Guest A'),
-          createMeetingToken(room.name, match.userB.profile?.alias || 'Guest B'),
+          createLiveKitToken(roomName, match.userA.profile?.alias || 'GuestA'),
+          createLiveKitToken(roomName, match.userB.profile?.alias || 'GuestB'),
         ]);
 
         const supabase2 = createServiceClient();
         const now2 = new Date().toISOString();
         const [resA, resB] = await Promise.all([
-          supabase2.from('queue').update({ status: 'matched', room_url: room.url, room_token: tokenA, matched_at: now2, matched_peer_id: match.userB.profile_id }).eq('id', match.userA.id),
-          supabase2.from('queue').update({ status: 'matched', room_url: room.url, room_token: tokenB, matched_at: now2, matched_peer_id: match.userA.profile_id }).eq('id', match.userB.id),
+          supabase2.from('queue').update({ status: 'matched', room_url: livekitUrl, room_token: tokenA, matched_at: now2, matched_peer_id: match.userB.profile_id }).eq('id', match.userA.id),
+          supabase2.from('queue').update({ status: 'matched', room_url: livekitUrl, room_token: tokenB, matched_at: now2, matched_peer_id: match.userA.profile_id }).eq('id', match.userB.id),
         ]);
         console.log('[matchWorker] queue A:', resA.error?.message ?? 'ok', 'B:', resB.error?.message ?? 'ok');
 
-        await supabase2.from('rooms').insert({ daily_room_name: room.name, daily_room_url: room.url, participant_1: match.userA.profile_id, participant_2: match.userB.profile_id, match_score: match.score, match_reason: match.reason }).catch(() => {});
+        await supabase2.from('rooms').insert({ daily_room_name: roomName, daily_room_url: livekitUrl, participant_1: match.userA.profile_id, participant_2: match.userB.profile_id, match_score: match.score, match_reason: match.reason }).catch(() => {});
         await supabase2.from('presence').update({ status: 'in_call' }).in('profile_id', [match.userA.profile_id, match.userB.profile_id]);
         console.log('[matchWorker] matched:', match.userA.profile_id, '<->', match.userB.profile_id);
       } catch (err: any) {
@@ -169,15 +159,15 @@ async function cleanupStale() {
 }
 
 app.get('/api/test', async (_req, res) => {
-  const dailyKey = process.env.DAILY_API_KEY || '';
-  if (!dailyKey) return res.json({ status: 'error', message: 'DAILY_API_KEY not set' });
-  const testRes = await fetch('https://api.daily.co/v1/rooms?limit=1', { headers: { Authorization: `Bearer ${dailyKey}` } });
-  if (testRes.ok) return res.json({ status: 'ok', message: 'Daily.co API key is valid and working' });
-  if (testRes.status === 401) return res.json({ status: 'error', message: 'Daily.co API key is invalid (401)' });
-  return res.json({ status: 'error', message: `Daily.co error: ${testRes.status}` });
+  const livekitKey = process.env.LIVEKIT_API_KEY || '';
+  const livekitSecret = process.env.LIVEKIT_API_SECRET || '';
+  const livekitUrl = process.env.LIVEKIT_URL || '';
+  if (!livekitKey || !livekitSecret || !livekitUrl) {
+    return res.json({ status: 'error', message: `Missing: ${[!livekitKey && 'LIVEKIT_API_KEY', !livekitSecret && 'LIVEKIT_API_SECRET', !livekitUrl && 'LIVEKIT_URL'].filter(Boolean).join(', ')}` });
+  }
+  return res.json({ status: 'ok', message: 'LiveKit config is set' });
 });
 
-// Debug: see what's in the queue right now
 app.get('/api/debug-queue', async (_req, res) => {
   try {
     const supabase = createServiceClient();
@@ -187,16 +177,26 @@ app.get('/api/debug-queue', async (_req, res) => {
   } catch (err: any) { res.json({ error: err.message }); }
 });
 
-app.get('/api/country', async (_req, res) => {
-  try {
-    const r = await fetch('https://ipworld.info/api/ip/self_country');
-    if (r.ok) { const t = await r.text(); if (t.trim().length === 2) return res.json({ country: t.trim().toUpperCase() }); }
-  } catch {}
-  try {
-    const r2 = await fetch('https://ip2c.org/self');
-    const t2 = await r2.text();
-    if (t2.startsWith('1;')) return res.json({ country: t2.split(';')[1] });
-  } catch {}
+// Use real user IP from x-forwarded-for (Vercel sets this)
+app.get('/api/country', async (req, res) => {
+  const forwarded = req.headers['x-forwarded-for'] as string | undefined;
+  const userIp = forwarded ? forwarded.split(',')[0].trim() : '';
+  const isLocal = !userIp || userIp === '::1' || userIp.startsWith('127.') || userIp.startsWith('192.168.') || userIp.startsWith('10.');
+
+  if (!isLocal) {
+    try {
+      const r = await fetch(`https://ip2c.org/${userIp}`);
+      const t = await r.text();
+      if (t.startsWith('1;')) return res.json({ country: t.split(';')[1] });
+    } catch {}
+    try {
+      const r2 = await fetch(`https://ipapi.co/${userIp}/country/`, { headers: { 'User-Agent': 'wrdvrg/1.0' } });
+      if (r2.ok) {
+        const t2 = await r2.text();
+        if (t2.trim().length === 2 && /^[A-Z]+$/.test(t2.trim())) return res.json({ country: t2.trim() });
+      }
+    } catch {}
+  }
   return res.json({ country: 'US' });
 });
 
@@ -227,7 +227,6 @@ app.post('/api/enqueue', async (req, res) => {
     const { data: cooldown } = await supabase.from('queue_cooldowns').select('cooldown_until').eq('profile_id', profileId).gt('cooldown_until', new Date().toISOString()).maybeSingle();
     if (cooldown) { const r = Math.ceil((new Date(cooldown.cooldown_until).getTime() - Date.now()) / 1000); return res.status(429).json({ error: 'cooldown_active', remainingSeconds: r }); }
 
-    // Already in queue
     const { data: existing } = await supabase.from('queue').select('id, status, room_url, room_token, matched_peer_id').eq('profile_id', profileId).eq('status', 'waiting').maybeSingle();
     if (existing) {
       await matchWorker();

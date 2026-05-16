@@ -1,84 +1,72 @@
-import { useEffect, useState, useRef } from 'react';
-import DailyIframe, { DailyCall } from '@daily-co/daily-js';
+import { useEffect, useRef, useState } from 'react';
+import { Room, RoomEvent, ConnectionState } from 'livekit-client';
 import { useCallStore } from '../store/useCallStore';
 
 export function useCall() {
-  const { callState, roomUrl, roomToken, setCallState, clearCall, isReconnecting, setReconnecting, setAutoConnect, autoConnect } = useCallStore();
-  const [callObject, setCallObject] = useState<DailyCall | null>(null);
-  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const { callState, roomUrl, roomToken, setCallState, clearCall, setReconnecting, autoConnect } = useCallStore();
+  const roomRef = useRef<Room | null>(null);
+  const [isMuted, setIsMuted] = useState(false);
 
   useEffect(() => {
     if ((callState === 'connecting' || callState === 'reconnecting') && roomUrl && roomToken) {
-      if (callObject) return; // already initializing/initialized
+      if (roomRef.current) return; // already connecting
 
-      const initCall = async () => {
-        const newCallObject = DailyIframe.createCallObject({
-          audioSource: true,
-          videoSource: false,
-        });
+      const room = new Room({
+        audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      roomRef.current = room;
 
-        // Event handlers
-        newCallObject.on('joined-meeting', () => {
+      room.on(RoomEvent.Connected, () => {
+        setCallState('connected');
+        setReconnecting(false);
+      });
+
+      room.on(RoomEvent.Disconnected, () => {
+        roomRef.current = null;
+        clearCall();
+        if (autoConnect) setTimeout(() => setCallState('searching'), 1500);
+      });
+
+      room.on(RoomEvent.ConnectionStateChanged, (state: ConnectionState) => {
+        if (state === ConnectionState.Reconnecting) {
+          setCallState('reconnecting');
+          setReconnecting(true);
+        } else if (state === ConnectionState.Connected) {
           setCallState('connected');
           setReconnecting(false);
-          // Persist to local storage per specs
-        });
+        }
+      });
 
-        newCallObject.on('participant-left', (e) => {
-          // If we are reconnecting and they skip, or they drop
-          // Spec: Handle partner skip
-          if (e.participant.local) return;
-          
+      room.connect(roomUrl, roomToken)
+        .then(() => room.localParticipant.setMicrophoneEnabled(true))
+        .catch((err) => {
+          console.error('[useCall] connect error:', err);
+          roomRef.current = null;
           setCallState('idle');
           clearCall();
-          if (newCallObject) {
-            newCallObject.leave().then(() => newCallObject.destroy());
-            setCallObject(null);
-          }
-
-          if (autoConnect) {
-            setTimeout(() => setCallState('searching'), 1500);
-          }
         });
-
-        newCallObject.on('network-connection', (ev: any) => {
-          if (ev.event === 'interrupted') {
-             // network short disconnect
-             setCallState('reconnecting');
-             setReconnecting(true);
-          }
-          if (ev.event === 'connected') {
-             setCallState('connected');
-             setReconnecting(false);
-          }
-        });
-
-        await newCallObject.join({ url: roomUrl, token: roomToken });
-        setCallObject(newCallObject);
-      };
-
-      initCall();
-    } else if (callState === 'idle' && callObject) {
-      // Clean up
-      callObject.leave().then(() => callObject.destroy());
-      setCallObject(null);
+    } else if (callState === 'idle' && roomRef.current) {
+      roomRef.current.disconnect();
+      roomRef.current = null;
     }
-
-    return () => {
-      // Cleanup on unmount handled gracefully
-      // we only destroy if unmounting entirely and leaving app, 
-      // otherwise handled by state changes
-    };
-  }, [callState, roomUrl, roomToken, callObject, setCallState, setReconnecting, clearCall, autoConnect]);
+  }, [callState, roomUrl, roomToken]);
 
   const endCall = () => {
+    if (roomRef.current) {
+      roomRef.current.disconnect();
+      roomRef.current = null;
+    }
     setCallState('idle');
     clearCall();
-    if (callObject) {
-      callObject.leave().then(() => callObject.destroy());
-      setCallObject(null);
+  };
+
+  const toggleMute = () => {
+    if (roomRef.current) {
+      const enabled = !isMuted;
+      roomRef.current.localParticipant.setMicrophoneEnabled(enabled);
+      setIsMuted(!enabled);
     }
   };
 
-  return { callObject, endCall };
+  return { endCall, toggleMute, isMuted };
 }
