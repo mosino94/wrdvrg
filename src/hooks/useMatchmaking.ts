@@ -15,7 +15,6 @@ export function useMatchmaking() {
     let active = true;
     let realtimeChannel: any = null;
 
-    // Get profile from DB, create it if doesn't exist yet
     const getOrCreateProfile = async () => {
       const { data: profile } = await supabase
         .from('profiles')
@@ -24,7 +23,6 @@ export function useMatchmaking() {
         .maybeSingle();
       if (profile) return profile;
 
-      // Profile not synced to DB yet - create it now
       const res = await fetch('/api/sync-profile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -37,10 +35,51 @@ export function useMatchmaking() {
       return null;
     };
 
+    const handleMatchPayload = async (row: any) => {
+      if (!active) return;
+      setCallState('connecting');
+
+      const matchedPeerId = row.matched_peer_id;
+      if (!matchedPeerId) return;
+
+      const { data: peerData } = await supabase
+        .from('profiles')
+        .select('id, alias, country_code, gender')
+        .eq('id', matchedPeerId)
+        .maybeSingle();
+
+      setPeerDetails({
+        id: matchedPeerId,
+        alias: peerData?.alias || 'Anonymous',
+        country: peerData?.country_code || null,
+        gender: peerData?.gender || null,
+      });
+
+      setRoomDetails({
+        id: row.id,
+        url: row.room_url,
+        token: row.room_token,
+      });
+    };
+
     const startSearching = async () => {
       try {
         const profile = await getOrCreateProfile();
         if (!profile || !active) return;
+
+        // Subscribe BEFORE enqueuing — match may happen during enqueue response
+        realtimeChannel = supabase
+          .channel(`queue-${profile.id}`)
+          .on(
+            'postgres_changes',
+            { event: 'UPDATE', schema: 'public', table: 'queue', filter: `profile_id=eq.${profile.id}` },
+            async (payload) => {
+              if (payload.new.status === 'matched') {
+                await handleMatchPayload(payload.new);
+              }
+            }
+          )
+          .subscribe();
 
         const enqueueRes = await fetch('/api/enqueue', {
           method: 'POST',
@@ -63,6 +102,20 @@ export function useMatchmaking() {
         const enqueueData = await enqueueRes.json();
         queueIdRef.current = enqueueData.queueId;
 
+        // Check current status immediately — match may have happened during enqueue
+        // and the Realtime event may have fired before subscribe() was fully active
+        const { data: currentEntry } = await supabase
+          .from('queue')
+          .select('id, status, room_url, room_token, matched_peer_id')
+          .eq('id', enqueueData.queueId)
+          .maybeSingle();
+
+        if (currentEntry?.status === 'matched' && active) {
+          await handleMatchPayload(currentEntry);
+          return;
+        }
+
+        // Still waiting — start heartbeat
         heartbeatIntervalRef.current = setInterval(() => {
           fetch('/api/heartbeat', {
             method: 'POST',
@@ -70,41 +123,6 @@ export function useMatchmaking() {
             body: JSON.stringify({ profileId: profile.id, queueId: queueIdRef.current }),
           }).catch(console.error);
         }, 10000);
-
-        realtimeChannel = supabase
-          .channel(`queue-${profile.id}`)
-          .on(
-            'postgres_changes',
-            { event: 'UPDATE', schema: 'public', table: 'queue', filter: `profile_id=eq.${profile.id}` },
-            async (payload) => {
-              if (payload.new.status === 'matched' && active) {
-                setCallState('connecting');
-
-                const matchedPeerId = payload.new.matched_peer_id;
-                if (!matchedPeerId) return;
-
-                const { data: peerData } = await supabase
-                  .from('profiles')
-                  .select('id, alias, country_code, gender')
-                  .eq('id', matchedPeerId)
-                  .maybeSingle();
-
-                setPeerDetails({
-                  id: matchedPeerId,
-                  alias: peerData?.alias || 'Anonymous',
-                  country: peerData?.country_code || null,
-                  gender: peerData?.gender || null,
-                });
-
-                setRoomDetails({
-                  id: payload.new.id,
-                  url: payload.new.room_url,
-                  token: payload.new.room_token,
-                });
-              }
-            }
-          )
-          .subscribe();
       } catch (err) {
         console.error('startSearching error:', err);
         if (active) setCallState('idle');
