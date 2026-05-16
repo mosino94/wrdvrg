@@ -9,13 +9,12 @@ import { useAppStore } from './store/useAppStore';
 import { useCallStore } from './store/useCallStore';
 import { genDeviceAlias } from './lib/fingerprint';
 import { useMatchmaking } from './hooks/useMatchmaking';
-import { useCall } from './hooks/useCall';
 import { IncomingRequestPopup } from './components/call/IncomingRequestPopup';
 import { getCallSession, clearCallSession } from './lib/callSession';
 
+// useMatchmaking runs globally so it's active regardless of which page is shown
 function GlobalHooks() {
   useMatchmaking();
-  useCall();
   return null;
 }
 
@@ -24,7 +23,7 @@ export default function App() {
   const { setCallState, setRoomDetails, setPeerDetails, setCallDurationBase } = useCallStore();
   const [showGenderModal, setShowGenderModal] = React.useState(false);
 
-  // Session recovery on mount
+  // Session recovery on mount — if user refreshed mid-call within 30s
   useEffect(() => {
     const session = getCallSession();
     if (session?.disconnectedAt) {
@@ -89,6 +88,7 @@ export default function App() {
     detectCountry();
   }, [alias]);
 
+  // Re-sync profile when gender changes
   useEffect(() => {
     if (!alias) return;
     fetch('/api/sync-profile', {
@@ -97,7 +97,7 @@ export default function App() {
       body: JSON.stringify({ alias, countryCode, gender }),
     })
       .then((r) => r.ok && r.json())
-      .then((p) => { if (p?.id) setProfileId(p.id); })
+      .then((p: any) => { if (p?.id) setProfileId(p.id); })
       .catch(() => {});
   }, [gender]);
 
@@ -118,7 +118,7 @@ export default function App() {
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
           <div className="bg-[#0C0C0C] border border-zinc-800 rounded-2xl w-full max-w-sm p-6 text-center animate-fadeUp">
             <h2 className="text-xl font-bold mb-2">Welcome!</h2>
-            <p className="text-zinc-400 text-sm mb-6">Before you start connecting, what's your gender?</p>
+            <p className="text-zinc-400 text-sm mb-6">Before you start connecting, what’s your gender?</p>
             <div className="flex gap-2 justify-center mb-6">
               <button
                 onClick={() => { setGender('male'); setShowGenderModal(false); localStorage.setItem('whisper_gender_prompted', 'true'); }}
