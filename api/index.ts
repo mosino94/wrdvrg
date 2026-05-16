@@ -148,6 +148,30 @@ async function cleanupStale() {
   } catch (err) { console.error('cleanupStale:', err); }
 }
 
+app.get('/api/test', async (_req, res) => {
+  try {
+    const dailyKey = process.env.DAILY_API_KEY || '';
+    if (!dailyKey) return res.json({ status: 'error', message: 'DAILY_API_KEY not set in Vercel env vars' });
+
+    // Test Daily.co API
+    const testRes = await fetch('https://api.daily.co/v1/rooms?limit=1', {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${dailyKey}` },
+    });
+    
+    if (testRes.ok) {
+      return res.json({ status: 'ok', message: 'Daily.co API key is valid and working' });
+    } else if (testRes.status === 401) {
+      return res.json({ status: 'error', message: 'Daily.co API key is invalid or expired (401 Unauthorized)' });
+    } else {
+      const err = await testRes.text();
+      return res.json({ status: 'error', message: `Daily.co API error: ${testRes.status} ${err}` });
+    }
+  } catch (err: any) {
+    return res.json({ status: 'error', message: `Test failed: ${err.message}` });
+  }
+});
+
 app.get('/api/country', async (_req, res) => {
   try {
     const r = await fetch('https://ipworld.info/api/ip/self_country');
