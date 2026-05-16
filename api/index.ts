@@ -21,28 +21,37 @@ async function createMeetingToken(roomName: string, userName: string) {
 
 interface ScoredPair { userA: any; userB: any; score: number; breakdown: Record<string, number>; reason: string; }
 
-let isMatchWorkerRunning = false;
 async function matchWorker() {
-  if (isMatchWorkerRunning) return;
-  isMatchWorkerRunning = true;
   try {
     const supabase = createServiceClient();
     const startTime = Date.now();
+
+    // Cleanup stale entries first
     const staleThreshold = new Date(Date.now() - 30_000).toISOString();
     const { data: staleEntries } = await supabase.from('queue').select('id, profile_id').eq('status', 'waiting').lt('last_heartbeat', staleThreshold);
     if (staleEntries?.length) {
       await supabase.from('queue').update({ status: 'cancelled' }).in('id', staleEntries.map((e: any) => e.id));
       await supabase.from('presence').update({ status: 'online' }).in('profile_id', staleEntries.map((e: any) => e.profile_id));
     }
+
+    // Fetch waiting users with their profiles
     const { data: waitingUsers } = await supabase.from('queue')
       .select(`id, profile_id, gender_filter, prefer_countries, avoid_countries, last_peer_id, last_5_peers, skip_count, joined_at, profiles!inner (id, gender, country_code, reputation)`)
-      .eq('status', 'waiting').gte('last_heartbeat', new Date(Date.now() - 30_000).toISOString()).order('joined_at', { ascending: true });
+      .eq('status', 'waiting')
+      .gte('last_heartbeat', new Date(Date.now() - 30_000).toISOString())
+      .order('joined_at', { ascending: true });
+
+    console.log('Waiting users:', waitingUsers?.length || 0);
     if (!waitingUsers || waitingUsers.length < 2) return;
+
+    // Fetch blocks
     const allProfileIds = waitingUsers.map((u: any) => u.profile_id);
-    const { data: allBlocks } = await supabase.from('blocks').select('blocker_id, blocked_id').or(`blocker_id.in.(${allProfileIds.join(',')}),blocked_id.in.(${allProfileIds.join(',')})`);
+    const { data: allBlocks } = await supabase.from('blocks').select('blocker_id, blocked_id')
+      .or(`blocker_id.in.(${allProfileIds.join(',')}),blocked_id.in.(${allProfileIds.join(',')})`);
     const blockSet = new Set<string>();
     allBlocks?.forEach((b: any) => { blockSet.add(`${b.blocker_id}|${b.blocked_id}`); blockSet.add(`${b.blocked_id}|${b.blocker_id}`); });
-    const isBlocked = (a: string, b: string) => blockSet.has(`${a}|${b}`);
+
+    // Score pairs
     const scoredPairs: ScoredPair[] = [];
     const now = Date.now();
     for (let i = 0; i < waitingUsers.length; i++) {
@@ -50,64 +59,78 @@ async function matchWorker() {
         const A = waitingUsers[i] as any; const B = waitingUsers[j] as any;
         const pA = Array.isArray(A.profiles) ? A.profiles[0] : A.profiles;
         const pB = Array.isArray(B.profiles) ? B.profiles[0] : B.profiles;
-        const breakdown: Record<string, number> = {}; let reason = 'base';
-        if (A.profile_id === B.profile_id || isBlocked(A.profile_id, B.profile_id)) continue;
+        if (!pA || !pB) continue;
+        if (A.profile_id === B.profile_id) continue;
+        if (blockSet.has(`${A.profile_id}|${B.profile_id}`)) continue;
         if (A.last_peer_id === B.profile_id || B.last_peer_id === A.profile_id) continue;
         if (A.last_5_peers?.includes(B.profile_id) || B.last_5_peers?.includes(A.profile_id)) continue;
         if (A.gender_filter !== 'all' && pB.gender !== A.gender_filter) continue;
         if (B.gender_filter !== 'all' && pA.gender !== B.gender_filter) continue;
         if (A.avoid_countries?.length && A.avoid_countries.includes(pB.country_code)) continue;
         if (B.avoid_countries?.length && B.avoid_countries.includes(pA.country_code)) continue;
-        if (pA.reputation < 20 && pB.reputation > 60) continue;
-        if (pB.reputation < 20 && pA.reputation > 60) continue;
-        let score = 100;
-        if (A.prefer_countries?.length && A.prefer_countries.includes(pB.country_code)) { score += 50; breakdown['a_p'] = 50; reason = 'country_preferred'; }
-        if (B.prefer_countries?.length && B.prefer_countries.includes(pA.country_code)) { score += 50; breakdown['b_p'] = 50; reason = 'country_preferred'; }
-        if (pA.country_code === pB.country_code) { score += 30; breakdown['same'] = 30; if (reason === 'base') reason = 'same_country'; }
-        if (breakdown['a_p'] && breakdown['b_p']) { score += 40; breakdown['mutual'] = 40; reason = 'mutual_country'; }
-        if (B.gender_filter !== 'all' && pA.gender === B.gender_filter) { score += 15; breakdown['am'] = 15; }
-        if (A.gender_filter !== 'all' && pB.gender === A.gender_filter) { score += 15; breakdown['bm'] = 15; }
-        const rd = Math.abs(pA.reputation - pB.reputation);
+
+        let score = 100; const breakdown: Record<string, number> = {}; let reason = 'base';
+        if (pA.country_code === pB.country_code) { score += 30; reason = 'same_country'; }
+        const rd = Math.abs((pA.reputation || 50) - (pB.reputation || 50));
         score += rd < 10 ? 25 : rd < 20 ? 15 : rd < 35 ? 5 : 0;
         const wA = Math.floor((now - new Date(A.joined_at).getTime()) / 1000);
         const wB = Math.floor((now - new Date(B.joined_at).getTime()) / 1000);
         if (wA > 10 && wB > 10) score += 20;
         if (wA > 20 || wB > 20) score += 15;
-        if (wA > 30 || wB > 30) { score += 30; reason = 'urgent_timeout'; }
-        if (A.skip_count > 5 || B.skip_count > 5) score -= 10;
-        if (pA.reputation < 40) score += -Math.floor((40 - pA.reputation) / 2);
-        if (pB.reputation < 40) score += -Math.floor((40 - pB.reputation) / 2);
+        if (wA > 30 || wB > 30) { score += 30; reason = 'urgent'; }
         score += Math.floor(Math.random() * 8);
         scoredPairs.push({ userA: A, userB: B, score: Math.max(score, 1), breakdown, reason });
       }
     }
+
+    if (!scoredPairs.length) { console.log('No valid pairs found'); return; }
+
+    // Greedy match
     scoredPairs.sort((a, b) => b.score - a.score);
     const matched = new Set<string>(); const finalMatches: ScoredPair[] = [];
     for (const pair of scoredPairs) {
       if (matched.has(pair.userA.profile_id) || matched.has(pair.userB.profile_id)) continue;
       finalMatches.push(pair); matched.add(pair.userA.profile_id); matched.add(pair.userB.profile_id);
-      if (finalMatches.length >= 50 || Date.now() - startTime > 1500) break;
+      if (finalMatches.length >= 10 || Date.now() - startTime > 2000) break;
     }
+
+    console.log('Creating', finalMatches.length, 'matches');
+
+    // Create rooms
     for (const match of finalMatches) {
       try {
         const roomRes = await fetch('https://api.daily.co/v1/rooms', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.DAILY_API_KEY || ''}` },
-          body: JSON.stringify({ privacy: 'private', properties: { max_participants: 2, exp: Math.floor(Date.now() / 1000) + 3600, enable_chat: false, enable_screenshare: false, audio_only: true, enable_recording: false } }),
+          body: JSON.stringify({ privacy: 'private', properties: { max_participants: 2, exp: Math.floor(Date.now() / 1000) + 3600, enable_chat: false, enable_screenshare: false, audio_only: true } }),
         });
-        if (!roomRes.ok) throw new Error(await roomRes.text());
+        if (!roomRes.ok) {
+          const errText = await roomRes.text();
+          console.error('Daily.co error:', errText);
+          throw new Error(errText);
+        }
         const room = await roomRes.json();
+        console.log('Room created:', room.name);
+
         const pA = Array.isArray(match.userA.profiles) ? match.userA.profiles[0] : match.userA.profiles;
         const pB = Array.isArray(match.userB.profiles) ? match.userB.profiles[0] : match.userB.profiles;
-        const [tokenA, tokenB] = await Promise.all([createMeetingToken(room.name, pA.alias || 'Guest'), createMeetingToken(room.name, pB.alias || 'Guest')]);
+        const [tokenA, tokenB] = await Promise.all([
+          createMeetingToken(room.name, pA?.alias || 'Guest A'),
+          createMeetingToken(room.name, pB?.alias || 'Guest B'),
+        ]);
+
         const supabase2 = createServiceClient();
         await supabase2.from('rooms').insert({ daily_room_name: room.name, daily_room_url: room.url, participant_1: match.userA.profile_id, participant_2: match.userB.profile_id, match_score: match.score, match_reason: match.reason });
-        await supabase2.from('queue').update({ status: 'matched', room_url: room.url, room_token: tokenA, matched_at: new Date().toISOString(), matched_peer_id: match.userB.profile_id }).eq('id', match.userA.id);
-        await supabase2.from('queue').update({ status: 'matched', room_url: room.url, room_token: tokenB, matched_at: new Date().toISOString(), matched_peer_id: match.userA.profile_id }).eq('id', match.userB.id);
+
+        const [resA, resB] = await Promise.all([
+          supabase2.from('queue').update({ status: 'matched', room_url: room.url, room_token: tokenA, matched_at: new Date().toISOString(), matched_peer_id: match.userB.profile_id }).eq('id', match.userA.id),
+          supabase2.from('queue').update({ status: 'matched', room_url: room.url, room_token: tokenB, matched_at: new Date().toISOString(), matched_peer_id: match.userA.profile_id }).eq('id', match.userB.id),
+        ]);
+
+        console.log('Queue updated - A:', resA.error, 'B:', resB.error);
+
         await supabase2.from('presence').update({ status: 'in_call' }).in('profile_id', [match.userA.profile_id, match.userB.profile_id]);
-        const wA2 = Math.floor((Date.now() - new Date(match.userA.joined_at).getTime()) / 1000);
-        const wB2 = Math.floor((Date.now() - new Date(match.userB.joined_at).getTime()) / 1000);
-        await supabase2.from('match_logs').insert({ user_a: match.userA.profile_id, user_b: match.userB.profile_id, score: match.score, score_breakdown: match.breakdown, wait_time_a_seconds: wA2, wait_time_b_seconds: wB2 });
+        console.log('Match complete:', match.userA.profile_id, '<->', match.userB.profile_id);
       } catch (err: any) {
         console.error('Room creation failed:', err.message);
         const s = createServiceClient();
@@ -115,7 +138,6 @@ async function matchWorker() {
       }
     }
   } catch (err) { console.error('matchWorker error:', err); }
-  finally { isMatchWorkerRunning = false; }
 }
 
 async function cleanupStale() {
@@ -129,7 +151,6 @@ async function cleanupStale() {
   } catch (err) { console.error('cleanupStale:', err); }
 }
 
-// ── Country detection (server-side, no CORS) ──
 app.get('/api/country', async (_req, res) => {
   try {
     const r = await fetch('https://ipworld.info/api/ip/self_country');
@@ -166,30 +187,34 @@ app.post('/api/enqueue', async (req, res) => {
   try {
     const { profileId, genderFilter = 'all', preferCountries = [], avoidCountries = [] } = req.body;
     const supabase = createServiceClient();
-    const { data: cooldown } = await supabase.from('queue_cooldowns').select('cooldown_until, reason').eq('profile_id', profileId).gt('cooldown_until', new Date().toISOString()).single();
+
+    const { data: cooldown } = await supabase.from('queue_cooldowns').select('cooldown_until').eq('profile_id', profileId).gt('cooldown_until', new Date().toISOString()).maybeSingle();
     if (cooldown) { const r = Math.ceil((new Date(cooldown.cooldown_until).getTime() - Date.now()) / 1000); return res.status(429).json({ error: 'cooldown_active', remainingSeconds: r }); }
 
-    // If already in queue, return existing entry (don't reject)
+    // Already in queue — return existing and try to match
     const { data: existing } = await supabase.from('queue').select('id').eq('profile_id', profileId).eq('status', 'waiting').maybeSingle();
     if (existing) {
-      matchWorker().catch(console.error);
+      await matchWorker(); // AWAIT — not fire-and-forget
       return res.json({ queueId: existing.id, status: 'waiting' });
     }
 
     const { data: activeRoom } = await supabase.from('rooms').select('id').or(`participant_1.eq.${profileId},participant_2.eq.${profileId}`).is('ended_at', null).maybeSingle();
     if (activeRoom) return res.status(409).json({ error: 'already_in_call' });
+
     const { data: lastCalls } = await supabase.from('call_history').select('peer_id').eq('owner_id', profileId).order('called_at', { ascending: false }).limit(5);
     const last5Peers = lastCalls?.map((c: any) => c.peer_id).filter(Boolean) || [];
-    const oneHourAgo = new Date(Date.now() - 3600000).toISOString();
-    const { count: rc } = await supabase.from('queue').select('id', { count: 'exact', head: true }).eq('profile_id', profileId).gte('joined_at', oneHourAgo);
-    if ((rc || 0) >= 30) {
-      await supabase.from('queue_cooldowns').upsert({ profile_id: profileId, reason: 'search_spam', cooldown_until: new Date(Date.now() + 5 * 60000).toISOString() });
-      return res.status(429).json({ error: 'rate_limited', remainingSeconds: 300 });
-    }
-    const { data: queueEntry, error } = await supabase.from('queue').insert({ profile_id: profileId, gender_filter: genderFilter, prefer_countries: preferCountries, avoid_countries: avoidCountries, last_peer_id: last5Peers[0] || null, last_5_peers: last5Peers.slice(0, 5) }).select().single();
+
+    const { data: queueEntry, error } = await supabase.from('queue').insert({
+      profile_id: profileId, gender_filter: genderFilter,
+      prefer_countries: preferCountries, avoid_countries: avoidCountries,
+      last_peer_id: last5Peers[0] || null, last_5_peers: last5Peers.slice(0, 5),
+    }).select().single();
     if (error) throw error;
+
     await supabase.from('presence').upsert({ profile_id: profileId, status: 'searching', last_heartbeat: new Date().toISOString() });
-    matchWorker().catch(console.error);
+
+    await matchWorker(); // AWAIT — ensures match completes before response
+
     return res.json({ queueId: queueEntry.id, status: 'waiting' });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
