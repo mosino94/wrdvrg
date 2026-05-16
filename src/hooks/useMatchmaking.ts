@@ -15,10 +15,32 @@ export function useMatchmaking() {
     let active = true;
     let realtimeChannel: any = null;
 
+    // Get profile from DB, create it if doesn't exist yet
+    const getOrCreateProfile = async () => {
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('alias', alias)
+        .maybeSingle();
+      if (profile) return profile;
+
+      // Profile not synced to DB yet - create it now
+      const res = await fetch('/api/sync-profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alias, countryCode, gender }),
+      });
+      if (res.ok) {
+        const p = await res.json();
+        return { id: p.id };
+      }
+      return null;
+    };
+
     const startSearching = async () => {
       try {
-        const { data: profile } = await supabase.from('profiles').select('id').eq('alias', alias).single();
-        if (!profile) return;
+        const profile = await getOrCreateProfile();
+        if (!profile || !active) return;
 
         const enqueueRes = await fetch('/api/enqueue', {
           method: 'POST',
@@ -27,8 +49,8 @@ export function useMatchmaking() {
             profileId: profile.id,
             genderFilter,
             preferCountries,
-            avoidCountries: blockCountries
-          })
+            avoidCountries: blockCountries,
+          }),
         });
 
         if (!enqueueRes.ok) {
@@ -41,60 +63,48 @@ export function useMatchmaking() {
         const enqueueData = await enqueueRes.json();
         queueIdRef.current = enqueueData.queueId;
 
-        // Start heartbeat
         heartbeatIntervalRef.current = setInterval(() => {
           fetch('/api/heartbeat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ profileId: profile.id, queueId: queueIdRef.current })
+            body: JSON.stringify({ profileId: profile.id, queueId: queueIdRef.current }),
           }).catch(console.error);
         }, 10000);
 
-        // Subscribe to our queue row for match notification
-        realtimeChannel = supabase.channel(`queue-${profile.id}`)
+        realtimeChannel = supabase
+          .channel(`queue-${profile.id}`)
           .on(
             'postgres_changes',
-            {
-              event: 'UPDATE',
-              schema: 'public',
-              table: 'queue',
-              filter: `profile_id=eq.${profile.id}`
-            },
+            { event: 'UPDATE', schema: 'public', table: 'queue', filter: `profile_id=eq.${profile.id}` },
             async (payload) => {
               if (payload.new.status === 'matched' && active) {
                 setCallState('connecting');
 
                 const matchedPeerId = payload.new.matched_peer_id;
-                if (!matchedPeerId) {
-                  console.error('matched_peer_id is missing from queue row');
-                  return;
-                }
+                if (!matchedPeerId) return;
 
-                const { data: peerData } = await supabase.from('profiles')
+                const { data: peerData } = await supabase
+                  .from('profiles')
                   .select('id, alias, country_code, gender')
                   .eq('id', matchedPeerId)
-                  .single();
+                  .maybeSingle();
 
                 setPeerDetails({
                   id: matchedPeerId,
                   alias: peerData?.alias || 'Anonymous',
                   country: peerData?.country_code || null,
-                  gender: peerData?.gender || null
+                  gender: peerData?.gender || null,
                 });
 
                 setRoomDetails({
                   id: payload.new.id,
                   url: payload.new.room_url,
-                  token: payload.new.room_token
+                  token: payload.new.room_token,
                 });
               }
             }
           )
-          .subscribe((status) => {
-            if (status === 'SUBSCRIBED') {
-              console.log('Matchmaking realtime subscribed for', profile.id);
-            }
-          });
+          .subscribe();
       } catch (err) {
         console.error('startSearching error:', err);
         if (active) setCallState('idle');
@@ -103,12 +113,16 @@ export function useMatchmaking() {
 
     const cleanupQueue = async () => {
       if (!alias) return;
-      const { data: profile } = await supabase.from('profiles').select('id').eq('alias', alias).single();
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('alias', alias)
+        .maybeSingle();
       if (profile) {
         await fetch('/api/dequeue', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ profileId: profile.id, queueId: queueIdRef.current })
+          body: JSON.stringify({ profileId: profile.id, queueId: queueIdRef.current }),
         }).catch(() => {});
         queueIdRef.current = null;
       }
@@ -117,15 +131,9 @@ export function useMatchmaking() {
     if (callState === 'searching') {
       startSearching();
     } else {
-      if (heartbeatIntervalRef.current) {
-        clearInterval(heartbeatIntervalRef.current);
-      }
-      if (realtimeChannel) {
-        supabase.removeChannel(realtimeChannel);
-      }
-      if (callState === 'idle') {
-        cleanupQueue();
-      }
+      if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+      if (realtimeChannel) supabase.removeChannel(realtimeChannel);
+      if (callState === 'idle') cleanupQueue();
     }
 
     return () => {

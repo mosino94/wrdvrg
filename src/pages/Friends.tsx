@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { supabase } from '@/src/lib/supabase';
 import { useAppStore } from '@/src/store/useAppStore';
 import { Flag } from '@/src/components/ui/Flag';
 import { StatusDot } from '@/src/components/ui/StatusDot';
 import { X, Phone, Edit2, Check } from 'lucide-react';
+import { supabase } from '@/src/lib/supabase';
 
 interface Friend {
-  id: string; // friend's profile_id
+  id: string;
   alias: string;
   nickname: string | null;
   country: string | null;
@@ -17,82 +17,68 @@ interface Friend {
 export function Friends() {
   const { alias } = useAppStore();
   const [friends, setFriends] = useState<Friend[]>([]);
+  const [myProfileId, setMyProfileId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
 
   useEffect(() => {
     let active = true;
-    
-    // In a real app we'd need auth.uid() to identify current user.
-    // Since we don't use Supabase Auth and rely on alias/fingerprint,
-    // we fetch our profile_id first.
+
     const loadFriends = async () => {
       try {
-        const { data: myProfile } = await supabase.from('profiles').select('id').eq('alias', alias).single();
-        if (!myProfile) return;
+        const { data: myProfile } = await supabase
+          .from('profiles')
+          .select('id')
+          .eq('alias', alias)
+          .maybeSingle();
+        if (!myProfile) { if (active) setLoading(false); return; }
 
-        const { data: friendsData } = await supabase
-          .from('friends')
-          .select(`
-            friend_id,
-            nickname,
-            profiles!friends_friend_id_fkey (alias, country_code, gender),
-            presence!presence_profile_id_fkey (status)
-          `)
-          .eq('owner_id', myProfile.id);
+        setMyProfileId(myProfile.id);
 
-        if (active && friendsData) {
-          setFriends(friendsData.map((f: any) => ({
-            id: f.friend_id,
-            alias: f.profiles.alias,
-            nickname: f.nickname,
-            country: f.profiles.country_code,
-            gender: f.profiles.gender,
-            status: f.presence?.status || 'offline'
-          })));
+        const res = await fetch(`/api/friends/${myProfile.id}`);
+        if (res.ok && active) {
+          const data = await res.json();
+          setFriends(data);
         }
       } catch (err) {
-        console.error("Failed to load friends", err);
+        console.error('Failed to load friends', err);
       } finally {
         if (active) setLoading(false);
       }
     };
 
     if (alias) loadFriends();
-
     return () => { active = false; };
   }, [alias]);
 
   const saveNickname = async (friendId: string) => {
-    // Save to DB
-    const { data: myProfile } = await supabase.from('profiles').select('id').eq('alias', alias).single();
-    if (!myProfile) return;
-
-    await supabase.from('friends')
-      .update({ nickname: editValue || null })
-      .eq('owner_id', myProfile.id)
-      .eq('friend_id', friendId);
-
-    // Update local state
+    if (!myProfileId) return;
+    await fetch(`/api/friends/${myProfileId}/nickname`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ friendId, nickname: editValue || null }),
+    });
     setFriends(friends.map(f => f.id === friendId ? { ...f, nickname: editValue || null } : f));
     setEditingId(null);
   };
 
   const removeFriend = async (friendId: string) => {
-    const { data: myProfile } = await supabase.from('profiles').select('id').eq('alias', alias).single();
-    if (!myProfile) return;
-
-    await supabase.from('friends')
-      .delete()
-      .eq('owner_id', myProfile.id)
-      .eq('friend_id', friendId);
-
+    if (!myProfileId) return;
+    await fetch(`/api/friends/${myProfileId}/remove`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ friendId }),
+    });
     setFriends(friends.filter(f => f.id !== friendId));
   };
 
   if (loading) {
-    return <div className="flex items-center justify-center h-full"><div className="w-6 h-6 border-2 border-orange-500 border-t-transparent rounded-full animate-spin" /></div>;
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="w-6 h-6 border-2 border-orange-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
   }
 
   return (
@@ -125,23 +111,23 @@ export function Friends() {
                   <div className="flex items-center gap-2">
                     {editingId === friend.id ? (
                       <div className="flex items-center gap-1">
-                        <input 
+                        <input
                           autoFocus
                           value={editValue}
                           onChange={(e) => setEditValue(e.target.value)}
-                          onKeyDown={(e) => { if(e.key === 'Enter') saveNickname(friend.id); if(e.key === 'Escape') setEditingId(null); }}
+                          onKeyDown={(e) => { if (e.key === 'Enter') saveNickname(friend.id); if (e.key === 'Escape') setEditingId(null); }}
                           className="bg-zinc-900 border border-orange-500 rounded px-2 py-1 text-sm outline-none w-32"
                           placeholder="Nickname"
                         />
-                        <button onClick={() => saveNickname(friend.id)} className="text-emerald-500 hover:bg-emerald-500/10 p-1 rounded"><Check size={14}/></button>
-                        <button onClick={() => setEditingId(null)} className="text-[#ef4444] hover:bg-[#ef4444]/10 p-1 rounded"><X size={14}/></button>
+                        <button onClick={() => saveNickname(friend.id)} className="text-emerald-500 hover:bg-emerald-500/10 p-1 rounded"><Check size={14} /></button>
+                        <button onClick={() => setEditingId(null)} className="text-[#ef4444] hover:bg-[#ef4444]/10 p-1 rounded"><X size={14} /></button>
                       </div>
                     ) : (
                       <>
                         <span className="font-bold text-lg">
-                          {friend.nickname ? `**${friend.nickname}** (${friend.alias})` : friend.alias}
+                          {friend.nickname ? `${friend.nickname} (${friend.alias})` : friend.alias}
                         </span>
-                        <button onClick={() => { setEditingId(friend.id); setEditValue(friend.nickname || ''); }} className="text-zinc-500 hover:text-zinc-100 transition-colors"><Edit2 size={14}/></button>
+                        <button onClick={() => { setEditingId(friend.id); setEditValue(friend.nickname || ''); }} className="text-zinc-500 hover:text-zinc-100 transition-colors"><Edit2 size={14} /></button>
                         {friend.gender === 'male' && <span className="text-sm">👨</span>}
                         {friend.gender === 'female' && <span className="text-sm">👩</span>}
                       </>
@@ -157,7 +143,7 @@ export function Friends() {
               </div>
 
               <div className="flex items-center gap-2">
-                <button 
+                <button
                   disabled={friend.status !== 'online'}
                   className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed border border-zinc-700 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
                 >
