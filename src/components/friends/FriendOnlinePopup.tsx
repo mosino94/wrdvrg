@@ -26,18 +26,17 @@ export function FriendOnlinePopup() {
         .from('profiles').select('id').eq('alias', alias).maybeSingle();
       if (!myProfile || !active) return;
 
-      // Load friends via API (no RLS issues)
       const res = await fetch(`/api/friends/${myProfile.id}`);
+      // Guard: only parse if JSON is actually returned
       if (!res.ok || !active) return;
+      if (!(res.headers.get('content-type') || '').includes('application/json')) return;
       const friends = await res.json();
 
-      // Build friend ID set and mark already-online as known (no popup on load)
       friends.forEach((f: any) => {
         friendIds.current.add(f.id);
         if (f.status !== 'offline') knownOnline.current.add(f.id);
       });
 
-      // Subscribe to presence changes — only react to friends
       channel = supabase.channel('friend-presence')
         .on('postgres_changes',
           { event: 'UPDATE', schema: 'public', table: 'presence' },
@@ -45,7 +44,6 @@ export function FriendOnlinePopup() {
             const friendId = payload.new.profile_id;
             const newStatus = payload.new.status;
 
-            // ONLY friends — ignore strangers
             if (!friendIds.current.has(friendId)) return;
 
             if (newStatus === 'online' && !knownOnline.current.has(friendId)) {
@@ -70,8 +68,8 @@ export function FriendOnlinePopup() {
         ).subscribe();
     };
 
-    // 5s grace period on load
-    const timer = setTimeout(() => { if (active && alias) setup(); }, 5000);
+    // 5s grace period on load, catch any unhandled errors
+    const timer = setTimeout(() => { if (active && alias) setup().catch(() => {}); }, 5000);
 
     return () => {
       active = false;

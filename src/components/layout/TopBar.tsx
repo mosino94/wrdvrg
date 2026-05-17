@@ -9,7 +9,10 @@ export function TopBar() {
   const onlineCount = useOnlineCount();
   const { alias, countryCode, gender } = useAppStore();
 
-  const formattedCount = new Intl.NumberFormat('en-US').format(onlineCount);
+  const formattedCount =
+    onlineCount === null
+      ? '...'
+      : new Intl.NumberFormat('en-US').format(onlineCount);
 
   return (
     <header className="w-full h-14 bg-[#0C0C0C] border-b border-zinc-800 flex items-center justify-between px-6 flex-shrink-0 z-50">
@@ -24,7 +27,7 @@ export function TopBar() {
         <div className="flex items-center gap-2 px-3 py-1 bg-zinc-900 border border-zinc-800 rounded-full">
           <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
           <span className="text-xs font-mono text-zinc-400">
-            <span className="text-zinc-100">{onlineCount > 0 ? formattedCount : '...'}</span>{' '}
+            <span className="text-zinc-100">{formattedCount}</span>{' '}
             <span className="hidden sm:inline">ONLINE</span>
           </span>
         </div>
