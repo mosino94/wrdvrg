@@ -1,11 +1,13 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useOnlineCount } from '@/src/hooks/usePresence';
 import { useAppStore } from '@/src/store/useAppStore';
 import { Flag } from '@/src/components/ui/Flag';
 
 export function TopBar() {
+  const navigate = useNavigate();
   const onlineCount = useOnlineCount();
-  const { alias, username, isGuest, countryCode, gender } = useAppStore();
+  const { alias, countryCode, gender } = useAppStore();
 
   const formattedCount = new Intl.NumberFormat('en-US').format(onlineCount);
 
@@ -22,14 +24,15 @@ export function TopBar() {
         <div className="flex items-center gap-2 px-3 py-1 bg-zinc-900 border border-zinc-800 rounded-full">
           <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
           <span className="text-xs font-mono text-zinc-400">
-            <span className="text-zinc-100">{formattedCount}</span> <span className="hidden sm:inline">ONLINE</span>
+            <span className="text-zinc-100">{onlineCount > 0 ? formattedCount : '...'}</span>{' '}
+            <span className="hidden sm:inline">ONLINE</span>
           </span>
         </div>
       </div>
 
       <div className="flex items-center gap-3">
-        <button 
-          onClick={() => window.location.hash = '#/settings'}
+        <button
+          onClick={() => navigate('/settings')}
           className="flex items-center gap-2 px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 rounded-lg transition-colors cursor-pointer group"
           title="Edit Profile"
         >

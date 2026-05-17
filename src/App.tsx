@@ -33,16 +33,17 @@ export default function App() {
     }
 
     const detectCountry = async () => {
-      let finalCountry = 'US';
+      // Use navigator.language as immediate fallback so we never show '?'
+      let finalCountry = navigator.language.split('-')[1]?.toUpperCase() || 'US';
       try {
-        // Route through our own API to avoid CORS
         const r = await fetch('/api/country');
-        if (r.ok) {
+        // Only parse as JSON if the server actually returns JSON (not an HTML error page)
+        if (r.ok && (r.headers.get('content-type') || '').includes('application/json')) {
           const { country } = await r.json();
-          if (country && country.length === 2) finalCountry = country;
+          if (country && typeof country === 'string' && country.length === 2) finalCountry = country;
         }
       } catch {
-        finalCountry = navigator.language.split('-')[1]?.toUpperCase() || 'US';
+        // keep navigator.language fallback
       }
       setCountryCode(finalCountry);
 
@@ -57,7 +58,7 @@ export default function App() {
         setProfileSynced(true);
       }
     };
-    detectCountry();
+    detectCountry().catch(() => {});
   }, [alias, setAlias, setCountryCode]);
 
   useEffect(() => {

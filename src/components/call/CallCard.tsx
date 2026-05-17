@@ -4,7 +4,7 @@ import { useFilterStore } from '@/src/store/useFilterStore';
 import { useReconnect } from '@/src/hooks/useReconnect';
 import { Flag } from '@/src/components/ui/Flag';
 import { cn } from '@/src/lib/utils';
-import { Mic, Search, Settings2, SkipForward, Plus, PhoneOff, MicOff } from 'lucide-react';
+import { Mic, MicOff, Search, Settings2, SkipForward, Plus, PhoneOff } from 'lucide-react';
 
 function useTimer(running: boolean) {
   const [seconds, setSeconds] = useState(0);
@@ -23,7 +23,11 @@ function formatTime(s: number) {
 }
 
 export function CallCard() {
-  const { callState, setCallState, peerAlias, peerCountry, peerGender } = useCallStore();
+  const {
+    callState, setCallState,
+    peerAlias, peerCountry, peerGender,
+    isMuted, requestToggleMute,
+  } = useCallStore();
   const { genderFilter, preferCountries, blockCountries } = useFilterStore();
   const { reconnectSeconds } = useReconnect();
   const queueSeconds = useTimer(callState === 'searching');
@@ -138,8 +142,17 @@ export function CallCard() {
           <button className="w-full py-3 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 rounded-xl flex items-center justify-center gap-2 transition-colors font-medium">
             <Plus size={18} /> Add {peerAlias || 'Stranger'} as friend
           </button>
-          <button className="w-full py-3 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 rounded-xl flex items-center justify-center gap-2 transition-colors font-medium">
-            <MicOff size={18} /> Mute mic
+          <button
+            onClick={requestToggleMute}
+            className={cn(
+              'w-full py-3 border rounded-xl flex items-center justify-center gap-2 transition-colors font-medium',
+              isMuted
+                ? 'bg-orange-500/10 border-orange-500 text-orange-400'
+                : 'bg-zinc-900 hover:bg-zinc-800 border-zinc-700'
+            )}
+          >
+            {isMuted ? <Mic size={18} /> : <MicOff size={18} />}
+            {isMuted ? 'Unmute mic' : 'Mute mic'}
           </button>
           <div className="flex gap-3">
             <button

@@ -4,6 +4,13 @@ import { useAppStore } from '../store/useAppStore';
 import { useFilterStore } from '../store/useFilterStore';
 import { supabase } from '../lib/supabase';
 
+// Returns parsed JSON only if the response is ok and content-type is JSON
+async function safeJson(res: Response): Promise<any | null> {
+  if (!res.ok) return null;
+  if (!(res.headers.get('content-type') || '').includes('application/json')) return null;
+  try { return await res.json(); } catch { return null; }
+}
+
 export function useMatchmaking() {
   const { callState, setCallState, setRoomDetails, setPeerDetails } = useCallStore();
   const { alias, gender, countryCode } = useAppStore();
@@ -30,11 +37,17 @@ export function useMatchmaking() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ alias, countryCode, gender }),
       });
-      if (res.ok) return { id: (await res.json()).id };
+      const data = await safeJson(res);
+      if (data?.id) return { id: data.id };
       return null;
     };
 
-    const handleMatch = async (data: { id?: string; queueId?: string; room_url?: string; roomUrl?: string; room_token?: string; roomToken?: string; matched_peer_id?: string; matchedPeerId?: string }) => {
+    const handleMatch = async (data: {
+      id?: string; queueId?: string;
+      room_url?: string; roomUrl?: string;
+      room_token?: string; roomToken?: string;
+      matched_peer_id?: string; matchedPeerId?: string;
+    }) => {
       if (!active || matchHandledRef.current) return;
       matchHandledRef.current = true;
 
@@ -44,7 +57,7 @@ export function useMatchmaking() {
       const matchedPeerId = data.matched_peer_id || data.matchedPeerId || '';
 
       if (!roomUrl || !roomToken || !matchedPeerId) {
-        console.error('[matchmaking] handleMatch called with incomplete data', data);
+        console.error('[matchmaking] handleMatch incomplete data', data);
         matchHandledRef.current = false;
         return;
       }
@@ -68,11 +81,11 @@ export function useMatchmaking() {
     };
 
     const startSearching = async () => {
+      queueIdRef.current = null; // clear stale ID from previous session
       try {
         const profile = await getOrCreateProfile();
         if (!profile || !active) return;
 
-        // Subscribe to Realtime BEFORE enqueue (fast path — fires if WebSocket is ready)
         realtimeChannel = supabase
           .channel(`queue-match-${profile.id}`)
           .on(
@@ -92,23 +105,27 @@ export function useMatchmaking() {
           body: JSON.stringify({ profileId: profile.id, genderFilter, preferCountries, avoidCountries: blockCountries }),
         });
 
-        if (!enqueueRes.ok) {
-          const err = await enqueueRes.json();
-          console.error('[matchmaking] enqueue error:', err);
+        const enqueueData = await safeJson(enqueueRes);
+        if (!enqueueData) {
+          console.error('[matchmaking] enqueue failed or returned non-JSON');
           if (active) setCallState('idle');
           return;
         }
 
-        const enqueueData = await enqueueRes.json();
+        if (enqueueData.error) {
+          console.error('[matchmaking] enqueue error:', enqueueData.error);
+          if (active) setCallState('idle');
+          return;
+        }
+
         queueIdRef.current = enqueueData.queueId;
 
-        // Enqueue response includes match data if matchWorker already matched us
         if (enqueueData.status === 'matched') {
           await handleMatch(enqueueData);
           return;
         }
 
-        // Start heartbeat — polls queue status every 8s as fallback if Realtime missed the event
+        // Heartbeat fallback every 8s in case Realtime misses the event
         heartbeatIntervalRef.current = setInterval(async () => {
           if (!active || matchHandledRef.current) return;
           try {
@@ -117,16 +134,14 @@ export function useMatchmaking() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ profileId: profile.id, queueId: queueIdRef.current }),
             });
-            if (hbRes.ok) {
-              const hbData = await hbRes.json();
-              if (hbData.status === 'matched') {
-                await handleMatch({
-                  queueId: queueIdRef.current || '',
-                  roomUrl: hbData.roomUrl,
-                  roomToken: hbData.roomToken,
-                  matchedPeerId: hbData.matchedPeerId,
-                });
-              }
+            const hbData = await safeJson(hbRes);
+            if (hbData?.status === 'matched') {
+              await handleMatch({
+                queueId: queueIdRef.current || '',
+                roomUrl: hbData.roomUrl,
+                roomToken: hbData.roomToken,
+                matchedPeerId: hbData.matchedPeerId,
+              });
             }
           } catch (e) { console.error('[matchmaking] heartbeat error:', e); }
         }, 8000);
