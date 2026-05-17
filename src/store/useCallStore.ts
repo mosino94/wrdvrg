@@ -15,6 +15,11 @@ interface CallStore {
   autoConnect: boolean;
   isMuted: boolean;
   toggleMuteRequested: boolean;
+  partnerMuted: boolean;
+
+  // Timer (Feature 4 — persists through reconnects)
+  callTime: number;          // current display value (seconds)
+  callElapsedBase: number;   // elapsed saved before reconnect pause
 
   setCallState: (state: CallState) => void;
   setRoomDetails: (details: { id: string; url: string; token: string }) => void;
@@ -24,6 +29,9 @@ interface CallStore {
   setIsMuted: (v: boolean) => void;
   requestToggleMute: () => void;
   clearToggleMuteRequest: () => void;
+  setPartnerMuted: (v: boolean) => void;
+  setCallTime: (v: number | ((prev: number) => number)) => void;
+  setCallElapsedBase: (v: number) => void;
   clearCall: () => void;
 }
 
@@ -40,6 +48,9 @@ export const useCallStore = create<CallStore>((set) => ({
   autoConnect: true,
   isMuted: false,
   toggleMuteRequested: false,
+  partnerMuted: false,
+  callTime: 0,
+  callElapsedBase: 0,
 
   setCallState: (callState) => set({ callState }),
   setRoomDetails: ({ id, url, token }) => set({ roomId: id, roomUrl: url, roomToken: token }),
@@ -54,6 +65,9 @@ export const useCallStore = create<CallStore>((set) => ({
   setIsMuted: (isMuted) => set({ isMuted }),
   requestToggleMute: () => set({ toggleMuteRequested: true }),
   clearToggleMuteRequest: () => set({ toggleMuteRequested: false }),
+  setPartnerMuted: (partnerMuted) => set({ partnerMuted }),
+  setCallTime: (v) => set((s) => ({ callTime: typeof v === 'function' ? v(s.callTime) : v })),
+  setCallElapsedBase: (callElapsedBase) => set({ callElapsedBase }),
   clearCall: () =>
     set({
       callState: 'idle',
@@ -66,5 +80,8 @@ export const useCallStore = create<CallStore>((set) => ({
       peerGender: null,
       isReconnecting: false,
       isMuted: false,
+      partnerMuted: false,
+      callTime: 0,
+      callElapsedBase: 0,
     }),
 }));

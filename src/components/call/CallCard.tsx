@@ -1,12 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useCallStore } from '@/src/store/useCallStore';
 import { useFilterStore } from '@/src/store/useFilterStore';
 import { useReconnect } from '@/src/hooks/useReconnect';
+import { useAppStore } from '@/src/store/useAppStore';
 import { Flag } from '@/src/components/ui/Flag';
+import { FriendRequestButton } from '@/src/components/call/FriendRequestButton';
 import { cn } from '@/src/lib/utils';
-import { Mic, MicOff, Search, Settings2, SkipForward, Plus, PhoneOff } from 'lucide-react';
+import { Mic, MicOff, Search, Settings2, SkipForward, PhoneOff, RefreshCw } from 'lucide-react';
+import { supabase } from '@/src/lib/supabase';
 
-function useTimer(running: boolean) {
+function useQueueTimer(running: boolean) {
   const [seconds, setSeconds] = useState(0);
   useEffect(() => {
     if (!running) { setSeconds(0); return; }
@@ -24,16 +27,58 @@ function formatTime(s: number) {
 
 export function CallCard() {
   const {
-    callState, setCallState,
-    peerAlias, peerCountry, peerGender,
+    callState, roomId, setCallState,
+    peerAlias, peerCountry, peerGender, peerId,
     isMuted, requestToggleMute,
+    partnerMuted,
+    callTime, callElapsedBase,
   } = useCallStore();
   const { genderFilter, preferCountries, blockCountries } = useFilterStore();
+  const { alias } = useAppStore();
   const { reconnectSeconds } = useReconnect();
-  const queueSeconds = useTimer(callState === 'searching');
-  const callSeconds = useTimer(callState === 'connected' || callState === 'reconnecting');
-
+  const queueSeconds = useQueueTimer(callState === 'searching');
   const filterCount = (genderFilter !== 'all' ? 1 : 0) + preferCountries.length + blockCountries.length;
+
+  const [myProfileId, setMyProfileId] = useState<string | null>(null);
+  const [isFriend, setIsFriend] = useState(false);
+  const isReconnecting = callState === 'reconnecting';
+
+  // Resolve own profileId + check friendship when peer changes
+  useEffect(() => {
+    if (!alias) return;
+    supabase.from('profiles').select('id').eq('alias', alias).maybeSingle().then(({ data }) => {
+      if (data) setMyProfileId(data.id);
+    });
+  }, [alias]);
+
+  useEffect(() => {
+    if (!myProfileId || !peerId) { setIsFriend(false); return; }
+    supabase.from('friends').select('id').eq('owner_id', myProfileId).eq('friend_id', peerId).maybeSingle().then(({ data }) => {
+      setIsFriend(!!data);
+    });
+  }, [myProfileId, peerId]);
+
+  const handleSkip = async () => {
+    if (roomId && myProfileId) {
+      await fetch('/api/end-call', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomId, profileId: myProfileId, reason: 'skip' }),
+      }).catch(() => {});
+    }
+    setCallState('searching');
+  };
+
+  const handleEndCall = async () => {
+    if (roomId && myProfileId) {
+      await fetch('/api/end-call', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomId, profileId: myProfileId, reason: 'end_call' }),
+      }).catch(() => {});
+    }
+    setCallState('idle');
+  };
 
   const renderIdle = () => (
     <div className="flex flex-col items-center justify-center p-8 bg-zinc-900/40 border border-zinc-800 rounded-2xl w-full min-h-[280px] text-center shadow-lg backdrop-blur-xl">
@@ -99,17 +144,23 @@ export function CallCard() {
   );
 
   const renderConnected = () => (
-    <div className="flex flex-col p-6 bg-zinc-900/40 border border-zinc-800 rounded-2xl w-full min-h-[400px] shadow-lg relative overflow-hidden backdrop-blur-xl">
-      {callState === 'reconnecting' && (
+    <div className="flex flex-col p-6 bg-zinc-900/40 border border-zinc-800 rounded-2xl w-full min-h-[420px] shadow-lg relative overflow-hidden backdrop-blur-xl">
+      {/* Reconnecting banner */}
+      {isReconnecting && (
         <div className="absolute top-0 left-0 right-0 bg-[#1a1200] border-b border-amber-500/30 p-2 flex items-center justify-center gap-2 z-20">
           <div className="w-3.5 h-3.5 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
           <span className="text-amber-500 text-sm font-medium">Reconnecting... ({reconnectSeconds}s remaining)</span>
         </div>
       )}
-      <div className={cn('flex flex-col flex-1', callState === 'reconnecting' && 'opacity-50 pointer-events-none')}>
+
+      <div className={cn('flex flex-col flex-1', isReconnecting && 'opacity-50 pointer-events-none')}>
+        {/* Peer avatar */}
         <div className="flex flex-col items-center justify-center flex-1 mt-4">
-          <div className="relative mb-5">
-            <div className="w-24 h-24 rounded-full bg-gradient-to-tr from-orange-600 to-amber-400 flex items-center justify-center text-4xl font-bold shadow-lg text-white">
+          <div className="relative mb-2">
+            <div
+              className="w-24 h-24 rounded-full bg-gradient-to-tr from-orange-600 to-amber-400 flex items-center justify-center text-4xl font-bold shadow-lg text-white"
+              style={{ filter: partnerMuted ? 'grayscale(60%)' : 'none', transition: 'filter 0.3s' }}
+            >
               {(peerAlias || 'A').charAt(0).toUpperCase()}
             </div>
             {peerCountry && (
@@ -117,55 +168,153 @@ export function CallCard() {
                 <Flag code={peerCountry} size={32} />
               </div>
             )}
+            {/* Partner muted badge */}
+            {partnerMuted && (
+              <div
+                style={{
+                  position: 'absolute', top: -4, left: -4,
+                  background: '#7f1d1d', borderRadius: '50%',
+                  width: 26, height: 26,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 13, border: '2px solid #0d0d1a',
+                  animation: 'pulse 2s infinite',
+                }}
+                title="Partner has muted their mic"
+              >
+                🔇
+              </div>
+            )}
           </div>
+
           <h3 className="font-bold text-2xl text-zinc-100 mb-1">{peerAlias || 'Anonymous'}</h3>
-          <div className="flex items-center gap-2 text-sm text-zinc-300 mb-2">
+          <div className="flex items-center gap-2 text-sm text-zinc-300 mb-1">
             {peerCountry && <Flag code={peerCountry} />}
             <span>{peerCountry || 'Unknown'}</span>
             {peerGender === 'male' && <span className="bg-zinc-900 px-2 py-0.5 rounded text-xs">Male</span>}
             {peerGender === 'female' && <span className="bg-zinc-900 px-2 py-0.5 rounded text-xs">Female</span>}
           </div>
-          <div className="flex items-center gap-2 px-3 py-1 bg-emerald-950/20 text-emerald-500 rounded-full border border-emerald-900/50 mb-8">
+
+          {/* Partner muted text */}
+          {partnerMuted && (
+            <p style={{ margin: '2px 0', fontSize: 11, color: '#ef4444', textAlign: 'center' }}>
+              🔇 {peerAlias} has muted their mic
+            </p>
+          )}
+          {/* Own mute warning */}
+          {isMuted && (
+            <p style={{ margin: '2px 0', fontSize: 11, color: '#f59e0b', textAlign: 'center' }}>
+              🔇 You are muted — partner cannot hear you
+            </p>
+          )}
+
+          {/* Timer */}
+          <div className="flex items-center gap-2 px-3 py-1 bg-emerald-950/20 text-emerald-500 rounded-full border border-emerald-900/50 mt-2 mb-4">
             <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-sm font-medium tracking-wide font-mono">{formatTime(callSeconds)}</span>
+            <span className="text-sm font-medium tracking-wide font-mono">
+              {isReconnecting
+                ? `⏸ Paused at ${formatTime(callElapsedBase)}`
+                : `● Connected · ${formatTime(callTime)}`}
+            </span>
           </div>
-          <div className="w-full flex items-center justify-center gap-1 mb-8">
+
+          {/* Waveform */}
+          <div className="w-full flex items-center justify-center gap-1 mb-6">
             {Array.from({ length: 20 }).map((_, i) => (
-              <div key={i} className="w-1.5 bg-orange-500 rounded-full animate-wave" style={{
-                height: `${Math.max(4, Math.random() * 40)}px`,
-                animationDelay: `${i * 0.05}s`,
-              }} />
+              <div
+                key={i}
+                className="rounded-full"
+                style={{
+                  width: 4,
+                  height: `${Math.max(4, Math.random() * 40)}px`,
+                  background: isMuted ? '#374151' : partnerMuted ? '#4b5563' : '#6366f1',
+                  animation: isMuted
+                    ? 'none'
+                    : partnerMuted
+                    ? `wave ${1.5}s ease-in-out infinite alternate`
+                    : `wave ${0.4 + Math.random() * 0.5}s ease-in-out infinite alternate`,
+                  animationDelay: `${i * 0.05}s`,
+                  transition: 'background 0.3s',
+                }}
+              />
             ))}
           </div>
         </div>
-        <div className="flex flex-col gap-3">
-          <button className="w-full py-3 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 rounded-xl flex items-center justify-center gap-2 transition-colors font-medium">
-            <Plus size={18} /> Add {peerAlias || 'Stranger'} as friend
-          </button>
+
+        {/* ── Call Controls (Feature 2: layout) ── */}
+        <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {/* 1. Friend Request — full width */}
+          {myProfileId && peerId && (
+            <FriendRequestButton
+              peer={{ id: peerId, alias: peerAlias || 'Anonymous', country: peerCountry, gender: peerGender }}
+              myProfileId={myProfileId}
+              isFriend={isFriend}
+              onRequestSent={() => {}}
+            />
+          )}
+
+          {/* Divider */}
+          <div style={{ height: 1, background: '#1a1a2e', width: '100%' }} />
+
+          {/* 2. Mute — full width, own row */}
           <button
             onClick={requestToggleMute}
-            className={cn(
-              'w-full py-3 border rounded-xl flex items-center justify-center gap-2 transition-colors font-medium',
-              isMuted
-                ? 'bg-orange-500/10 border-orange-500 text-orange-400'
-                : 'bg-zinc-900 hover:bg-zinc-800 border-zinc-700'
-            )}
+            style={{
+              width: '100%', padding: '12px 16px', borderRadius: 12,
+              background: isMuted ? '#7f1d1d' : '#1e1e3f',
+              color: isMuted ? '#fca5a5' : '#94a3b8',
+              border: `1px solid ${isMuted ? '#991b1b' : '#2d2d4e'}`,
+              cursor: 'pointer', fontSize: 14, fontWeight: 500,
+              textAlign: 'left', display: 'flex', alignItems: 'center', gap: 10,
+              transition: 'all 0.2s',
+            }}
           >
-            {isMuted ? <Mic size={18} /> : <MicOff size={18} />}
-            {isMuted ? 'Unmute mic' : 'Mute mic'}
+            <span style={{ fontSize: 18 }}>{isMuted ? '🎤' : '🔇'}</span>
+            <span>{isMuted ? 'Unmute mic' : 'Mute mic'}</span>
+            {isMuted && (
+              <span style={{
+                marginLeft: 'auto', fontSize: 11, padding: '2px 8px',
+                borderRadius: 20, background: '#991b1b', color: '#fca5a5',
+              }}>
+                Partner can't hear you
+              </span>
+            )}
           </button>
-          <div className="flex gap-3">
+
+          {/* 3. Reconnect — full width, own row */}
+          <button
+            onClick={() => setCallState('reconnecting')}
+            style={{
+              width: '100%', padding: '12px 16px', borderRadius: 12,
+              background: '#1e1e3f', color: '#94a3b8',
+              border: '1px solid #2d2d4e', cursor: 'pointer', fontSize: 14,
+              fontWeight: 500, textAlign: 'left', display: 'flex', alignItems: 'center', gap: 10,
+            }}
+          >
+            <span style={{ fontSize: 18 }}>🔄</span>
+            <span>Reconnect</span>
+          </button>
+
+          {/* 4. Skip + End Call — 50/50 */}
+          <div style={{ display: 'flex', gap: 10 }}>
             <button
-              onClick={() => setCallState('searching')}
-              className="flex-1 py-3 bg-zinc-800 hover:bg-zinc-700 text-white rounded-xl flex items-center justify-center gap-2 transition-colors font-bold"
+              onClick={handleSkip}
+              style={{
+                flex: 1, padding: '12px', borderRadius: 12,
+                background: '#1e293b', color: '#f59e0b',
+                border: '1px solid #2d2d4e', cursor: 'pointer', fontSize: 14, fontWeight: 500,
+              }}
             >
-              <SkipForward size={18} fill="currentColor" /> Skip
+              ⏭ Skip
             </button>
             <button
-              onClick={() => setCallState('idle')}
-              className="flex-1 py-3 bg-[#ef4444] hover:bg-[#dc2626] text-white rounded-xl flex items-center justify-center gap-2 transition-colors font-bold"
+              onClick={handleEndCall}
+              style={{
+                flex: 1, padding: '12px', borderRadius: 12,
+                background: '#7f1d1d', color: '#fca5a5',
+                border: 'none', cursor: 'pointer', fontSize: 14, fontWeight: 700,
+              }}
             >
-              <PhoneOff size={18} /> End call
+              📵 End call
             </button>
           </div>
         </div>

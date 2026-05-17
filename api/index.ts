@@ -327,4 +327,91 @@ app.get('/api/cron/match', async (_req, res) => {
   res.json({ ok: true });
 });
 
+// ── FRIEND REQUESTS ──────────────────────────────────────────────────────────
+
+app.post('/api/friend-requests/send', async (req, res) => {
+  try {
+    const { senderId, receiverId } = req.body;
+    if (!senderId || !receiverId) return res.status(400).json({ error: 'missing_fields' });
+    if (senderId === receiverId) return res.status(400).json({ error: 'cannot_add_self' });
+    const supabase = createServiceClient();
+
+    const { data: alreadyFriend } = await supabase.from('friends').select('id').eq('owner_id', senderId).eq('friend_id', receiverId).maybeSingle();
+    if (alreadyFriend) return res.status(409).json({ error: 'already_friends' });
+
+    const { data: existing } = await supabase.from('friend_requests').select('id, status').eq('sender_id', senderId).eq('receiver_id', receiverId).maybeSingle();
+    if (existing?.status === 'pending') return res.status(409).json({ error: 'request_already_sent' });
+
+    const { data: sender } = await supabase.from('profiles').select('alias, country_code, gender').eq('id', senderId).single();
+    if (!sender) return res.status(404).json({ error: 'sender_not_found' });
+
+    const { data: request, error } = await supabase.from('friend_requests').upsert({
+      sender_id: senderId,
+      receiver_id: receiverId,
+      sender_alias: sender.alias,
+      sender_country: sender.country_code,
+      sender_gender: sender.gender,
+      status: 'pending',
+      sent_at: new Date().toISOString(),
+    }).select().single();
+    if (error) throw error;
+
+    return res.json({ requestId: request.id, status: 'sent' });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/friend-requests/respond', async (req, res) => {
+  try {
+    const { requestId, responderId, response } = req.body;
+    if (!requestId || !responderId || !response) return res.status(400).json({ error: 'missing_fields' });
+    if (!['accept', 'decline'].includes(response)) return res.status(400).json({ error: 'invalid_response' });
+    const supabase = createServiceClient();
+
+    const { data: request } = await supabase.from('friend_requests').select('*').eq('id', requestId).eq('receiver_id', responderId).eq('status', 'pending').maybeSingle();
+    if (!request) return res.status(404).json({ error: 'request_not_found' });
+
+    await supabase.from('friend_requests').update({
+      status: response === 'accept' ? 'accepted' : 'declined',
+      responded_at: new Date().toISOString(),
+    }).eq('id', requestId);
+
+    if (response === 'accept') {
+      await supabase.from('friends').insert([
+        { owner_id: responderId, friend_id: request.sender_id, nickname: '' },
+        { owner_id: request.sender_id, friend_id: responderId, nickname: '' },
+      ]);
+      const { data: responder } = await supabase.from('profiles').select('alias, country_code, gender').eq('id', responderId).single();
+      return res.json({ status: 'accepted', newFriend: { alias: responder?.alias, country: responder?.country_code, gender: responder?.gender } });
+    }
+    return res.json({ status: 'declined' });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/friend-requests/pending/:profileId', async (req, res) => {
+  try {
+    const { profileId } = req.params;
+    const supabase = createServiceClient();
+    const { data } = await supabase.from('friend_requests').select('id, sender_id, sender_alias, sender_country, sender_gender, sent_at').eq('receiver_id', profileId).eq('status', 'pending').order('sent_at', { ascending: false });
+    return res.json(data || []);
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+// ── END CALL BROADCAST ───────────────────────────────────────────────────────
+
+app.post('/api/end-call', async (req, res) => {
+  try {
+    const { roomId, profileId, reason } = req.body;
+    if (!roomId || !profileId) return res.status(400).json({ error: 'missing_fields' });
+    const supabase = createServiceClient();
+
+    await supabase.channel(`room-broadcast-${roomId}`).send({
+      type: 'broadcast',
+      event: 'call_ended',
+      payload: { reason: reason || 'end_call', endedBy: profileId, endedAt: new Date().toISOString() },
+    });
+
+    return res.json({ ok: true });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
 export default app;

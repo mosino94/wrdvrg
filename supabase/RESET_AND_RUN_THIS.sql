@@ -138,12 +138,19 @@ create index idx_friends_owner on friends(owner_id);
 -- FRIEND REQUESTS
 create table friend_requests (
   id uuid primary key default gen_random_uuid(),
-  sender_id uuid references profiles(id) on delete cascade,
-  receiver_id uuid references profiles(id) on delete cascade,
-  status text default 'pending' check (status in ('pending', 'accepted', 'rejected')),
+  sender_id uuid not null references profiles(id) on delete cascade,
+  receiver_id uuid not null references profiles(id) on delete cascade,
+  sender_alias text not null default '',
+  sender_country char(2),
+  sender_gender text,
+  status text default 'pending' check (status in ('pending', 'accepted', 'declined', 'rejected')),
+  sent_at timestamptz default now(),
+  responded_at timestamptz,
   created_at timestamptz default now(),
   unique(sender_id, receiver_id)
 );
+create index idx_friend_requests_receiver on friend_requests(receiver_id, status);
+create index idx_friend_requests_sender on friend_requests(sender_id, status);
 
 -- CALLBACK REQUESTS
 create table callback_requests (
