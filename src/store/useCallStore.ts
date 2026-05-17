@@ -13,12 +13,17 @@ interface CallStore {
   peerGender: string | null;
   isReconnecting: boolean;
   autoConnect: boolean;
-  
+  isMuted: boolean;
+  toggleMuteRequested: boolean;
+
   setCallState: (state: CallState) => void;
-  setRoomDetails: (details: { id: string, url: string, token: string }) => void;
-  setPeerDetails: (details: { id: string, alias: string, country: string | null, gender: string | null } | null) => void;
+  setRoomDetails: (details: { id: string; url: string; token: string }) => void;
+  setPeerDetails: (details: { id: string; alias: string; country: string | null; gender: string | null } | null) => void;
   setReconnecting: (isReconnecting: boolean) => void;
   setAutoConnect: (autoConnect: boolean) => void;
+  setIsMuted: (v: boolean) => void;
+  requestToggleMute: () => void;
+  clearToggleMuteRequest: () => void;
   clearCall: () => void;
 }
 
@@ -33,21 +38,33 @@ export const useCallStore = create<CallStore>((set) => ({
   peerGender: null,
   isReconnecting: false,
   autoConnect: true,
+  isMuted: false,
+  toggleMuteRequested: false,
 
   setCallState: (callState) => set({ callState }),
   setRoomDetails: ({ id, url, token }) => set({ roomId: id, roomUrl: url, roomToken: token }),
-  setPeerDetails: (details) => set(details ? { peerId: details.id, peerAlias: details.alias, peerCountry: details.country, peerGender: details.gender } : { peerId: null, peerAlias: null, peerCountry: null, peerGender: null }),
+  setPeerDetails: (details) =>
+    set(
+      details
+        ? { peerId: details.id, peerAlias: details.alias, peerCountry: details.country, peerGender: details.gender }
+        : { peerId: null, peerAlias: null, peerCountry: null, peerGender: null }
+    ),
   setReconnecting: (isReconnecting) => set({ isReconnecting }),
   setAutoConnect: (autoConnect) => set({ autoConnect }),
-  clearCall: () => set({
-    callState: 'idle',
-    roomId: null,
-    roomUrl: null,
-    roomToken: null,
-    peerId: null,
-    peerAlias: null,
-    peerCountry: null,
-    peerGender: null,
-    isReconnecting: false
-  })
+  setIsMuted: (isMuted) => set({ isMuted }),
+  requestToggleMute: () => set({ toggleMuteRequested: true }),
+  clearToggleMuteRequest: () => set({ toggleMuteRequested: false }),
+  clearCall: () =>
+    set({
+      callState: 'idle',
+      roomId: null,
+      roomUrl: null,
+      roomToken: null,
+      peerId: null,
+      peerAlias: null,
+      peerCountry: null,
+      peerGender: null,
+      isReconnecting: false,
+      isMuted: false,
+    }),
 }));
