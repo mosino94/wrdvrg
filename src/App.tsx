@@ -12,7 +12,6 @@ import { useMatchmaking } from './hooks/useMatchmaking';
 import { IncomingRequestPopup } from './components/call/IncomingRequestPopup';
 import { getCallSession, clearCallSession } from './lib/callSession';
 
-// useMatchmaking runs globally so it's active regardless of which page is shown
 function GlobalHooks() {
   useMatchmaking();
   return null;
@@ -58,16 +57,21 @@ export default function App() {
     const detectCountry = async () => {
       let finalCountry = 'US';
       try {
-        const r = await fetch('https://ipworld.info/api/ip/self_country');
+        // Use server-side country detection (avoids browser CORS issues)
+        const r = await fetch('/api/country');
         if (r.ok) {
-          const d = await r.text();
-          if (d && d.trim().length === 2) finalCountry = d.trim().toUpperCase();
+          const d = await r.json();
+          if (d?.countryCode && d.countryCode.length === 2) {
+            finalCountry = d.countryCode.toUpperCase();
+          }
         }
       } catch {
+        // Cloudflare CDN trace as browser-side fallback
         try {
-          const r2 = await fetch('https://ip2c.org/self');
-          const d2 = await r2.text();
-          if (d2?.startsWith('1;')) finalCountry = d2.split(';')[1] || 'US';
+          const r2 = await fetch('https://cloudflare.com/cdn-cgi/trace');
+          const text = await r2.text();
+          const match = text.match(/loc=([A-Z]{2})/);
+          if (match) finalCountry = match[1];
         } catch {}
       }
       setCountryCode(finalCountry);
@@ -80,7 +84,10 @@ export default function App() {
         });
         if (res.ok) {
           const profile = await res.json();
-          if (profile?.id) setProfileId(profile.id);
+          if (profile?.id) {
+            setProfileId(profile.id);
+            localStorage.setItem('whisper_profile_id', profile.id);
+          }
         }
       } catch {}
     };
@@ -97,7 +104,7 @@ export default function App() {
       body: JSON.stringify({ alias, countryCode, gender }),
     })
       .then((r) => r.ok && r.json())
-      .then((p: any) => { if (p?.id) setProfileId(p.id); })
+      .then((p: any) => { if (p?.id) { setProfileId(p.id); localStorage.setItem('whisper_profile_id', p.id); } })
       .catch(() => {});
   }, [gender]);
 
@@ -118,7 +125,7 @@ export default function App() {
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
           <div className="bg-[#0C0C0C] border border-zinc-800 rounded-2xl w-full max-w-sm p-6 text-center animate-fadeUp">
             <h2 className="text-xl font-bold mb-2">Welcome!</h2>
-            <p className="text-zinc-400 text-sm mb-6">Before you start connecting, what’s your gender?</p>
+            <p className="text-zinc-400 text-sm mb-6">Before you start connecting, what's your gender?</p>
             <div className="flex gap-2 justify-center mb-6">
               <button
                 onClick={() => { setGender('male'); setShowGenderModal(false); localStorage.setItem('whisper_gender_prompted', 'true'); }}

@@ -56,18 +56,28 @@ export function useMatchmaking() {
     const startSearching = async () => {
       try {
         matchHandledRef.current = false;
-        const resolvedProfileId = profileId || (() => {
-          const pid = localStorage.getItem('whisper_profile_id');
-          return pid;
-        })();
 
-        if (!resolvedProfileId && !alias) { if (active) setCallState('idle'); return; }
+        // Resolve profile ID: store → localStorage → API (never direct Supabase anon query)
+        let pid = profileId || localStorage.getItem('whisper_profile_id') || null;
 
-        let pid = resolvedProfileId;
         if (!pid) {
-          const { data: profile } = await supabase.from('profiles').select('id').eq('alias', alias!).single();
-          if (!profile) { if (active) setCallState('idle'); return; }
-          pid = profile.id;
+          if (!alias) { if (active) setCallState('idle'); return; }
+          try {
+            const res = await fetch('/api/sync-profile', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ alias, countryCode: null, gender: null }),
+            });
+            if (res.ok) {
+              const profile = await res.json();
+              if (profile?.id) {
+                pid = profile.id;
+                useAppStore.getState().setProfileId(profile.id);
+                localStorage.setItem('whisper_profile_id', profile.id);
+              }
+            }
+          } catch {}
+          if (!pid) { if (active) setCallState('idle'); return; }
         }
 
         // Subscribe to realtime BEFORE enqueue to avoid race condition
@@ -103,14 +113,14 @@ export function useMatchmaking() {
         const enqueueData = await enqueueRes.json();
         queueIdRef.current = enqueueData.queueId;
 
-        // If already matched from enqueue response
+        // Already matched from enqueue response (synchronous match)
         if (enqueueData.status === 'matched' && active) {
           if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
           await handleMatch(enqueueData);
           return;
         }
 
-        // Heartbeat polls every 8s — also checks match status as fallback
+        // Heartbeat polls every 8s as fallback for missed Realtime events
         heartbeatIntervalRef.current = setInterval(async () => {
           if (!active) return;
           try {
@@ -133,21 +143,14 @@ export function useMatchmaking() {
     };
 
     const cleanupQueue = async () => {
-      const resolvedProfileId = profileId || localStorage.getItem('whisper_profile_id');
-      if (!resolvedProfileId && !alias) return;
-      let pid = resolvedProfileId;
-      if (!pid) {
-        const { data: profile } = await supabase.from('profiles').select('id').eq('alias', alias!).single();
-        pid = profile?.id;
-      }
-      if (pid && queueIdRef.current) {
-        await fetch('/api/dequeue', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ profileId: pid, queueId: queueIdRef.current }),
-        }).catch(() => {});
-        queueIdRef.current = null;
-      }
+      const pid = profileId || localStorage.getItem('whisper_profile_id');
+      if (!pid || !queueIdRef.current) return;
+      await fetch('/api/dequeue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profileId: pid, queueId: queueIdRef.current }),
+      }).catch(() => {});
+      queueIdRef.current = null;
     };
 
     if (callState === 'searching') {

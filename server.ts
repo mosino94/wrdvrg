@@ -12,7 +12,7 @@ function createServiceClient() {
 
 const app = express();
 app.use(express.json());
-const PORT = 3000;
+const PORT = parseInt(process.env.PORT || '3000', 10);
 
 // LiveKit JWT (pure Node.js crypto — no SDK needed)
 async function createLiveKitToken(room: string, identity: string): Promise<string> {
@@ -30,6 +30,20 @@ async function createLiveKitToken(room: string, identity: string): Promise<strin
   const sig = createHmac('sha256', apiSecret).update(input).digest('base64url');
   return `${input}.${sig}`;
 }
+
+// Online count — queries presence table server-side
+app.get('/api/online-count', async (_req, res) => {
+  try {
+    const supabase = createServiceClient();
+    const { count } = await supabase
+      .from('presence')
+      .select('*', { count: 'exact', head: true })
+      .gte('last_heartbeat', new Date(Date.now() - 600_000).toISOString());
+    return res.json({ count: count ?? 0 });
+  } catch {
+    return res.json({ count: 0 });
+  }
+});
 
 // Country detection using real client IP from x-forwarded-for
 app.get('/api/country', async (req, res) => {
@@ -67,7 +81,7 @@ app.post('/api/sync-profile', async (req, res) => {
     } else {
       const updates: any = {};
       if (countryCode && profile.country_code !== countryCode) updates.country_code = countryCode;
-      if (gender !== undefined && profile.gender !== gender) updates.gender = gender;
+      if (gender !== undefined && gender !== null && profile.gender !== gender) updates.gender = gender;
       if (Object.keys(updates).length) {
         const { data: up } = await supabase.from('profiles').update(updates).eq('id', profile.id).select().single();
         if (up) profile = up;
@@ -233,7 +247,7 @@ async function matchWorker() {
       await supabase.from('presence').update({ status: 'online' }).in('profile_id', stale.map((e: any) => e.profile_id));
     }
 
-    // Two separate queries to avoid ambiguous FK join
+    // Two separate queries to avoid ambiguous FK join (queue has 3 FKs to profiles)
     const { data: waitingQueue } = await supabase.from('queue')
       .select('id, profile_id, gender_filter, prefer_countries, avoid_countries, last_peer_id, last_5_peers, skip_count, joined_at')
       .eq('status', 'waiting')
