@@ -134,6 +134,15 @@ export function useCall() {
         roomChannelRef.current?.unsubscribe();
         roomChannelRef.current = null;
         stopTimer();
+        // End room in DB so re-queue works
+        const pid = myProfileIdRef.current;
+        if (pid) {
+          fetch('/api/dequeue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profileId: pid }),
+          }).catch(() => {});
+        }
         clearCall();
         setPartnerMuted(false);
 

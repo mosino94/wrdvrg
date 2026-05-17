@@ -234,8 +234,18 @@ app.post('/api/enqueue', async (req, res) => {
       return res.json({ queueId: existing.id, status: updated?.status || 'waiting', roomUrl: updated?.room_url || null, roomToken: updated?.room_token || null, matchedPeerId: updated?.matched_peer_id || null });
     }
 
-    const { data: activeRoom } = await supabase.from('rooms').select('id').or(`participant_1.eq.${profileId},participant_2.eq.${profileId}`).is('ended_at', null).maybeSingle();
-    if (activeRoom) return res.status(409).json({ error: 'already_in_call' });
+    // Auto-end any stale active rooms (older than 3 min) so they don't block re-queueing
+    await supabase.from('rooms')
+      .update({ ended_at: new Date().toISOString() })
+      .or(`participant_1.eq.${profileId},participant_2.eq.${profileId}`)
+      .is('ended_at', null)
+      .lt('started_at', new Date(Date.now() - 3 * 60_000).toISOString());
+
+    const { data: activeRoom } = await supabase.from('rooms').select('id, started_at').or(`participant_1.eq.${profileId},participant_2.eq.${profileId}`).is('ended_at', null).maybeSingle();
+    if (activeRoom) {
+      // Fresh active room (< 3 min) — end it anyway so user can re-queue
+      await supabase.from('rooms').update({ ended_at: new Date().toISOString() }).eq('id', activeRoom.id);
+    }
 
     const { data: lastCalls } = await supabase.from('call_history').select('peer_id').eq('owner_id', profileId).order('called_at', { ascending: false }).limit(5);
     const last5Peers = lastCalls?.map((c: any) => c.peer_id).filter(Boolean) || [];
@@ -276,7 +286,11 @@ app.post('/api/dequeue', async (req, res) => {
   try {
     const { profileId, queueId } = req.body; const supabase = createServiceClient();
     if (queueId) await supabase.from('queue').update({ status: 'cancelled' }).eq('id', queueId).eq('profile_id', profileId);
-    else await supabase.from('queue').update({ status: 'cancelled' }).eq('profile_id', profileId).eq('status', 'waiting');
+    else await supabase.from('queue').update({ status: 'cancelled' }).eq('profile_id', profileId).in('status', ['waiting', 'matched']);
+    // Also end any active rooms so user can re-queue freely
+    await supabase.from('rooms').update({ ended_at: new Date().toISOString() })
+      .or(`participant_1.eq.${profileId},participant_2.eq.${profileId}`)
+      .is('ended_at', null);
     await supabase.from('presence').update({ status: 'online', last_heartbeat: new Date().toISOString() }).eq('profile_id', profileId);
     return res.json({ ok: true });
   } catch (err: any) { res.status(500).json({ error: err.message }); }

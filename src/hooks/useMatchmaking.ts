@@ -99,21 +99,23 @@ export function useMatchmaking() {
           )
           .subscribe();
 
-        const enqueueRes = await fetch('/api/enqueue', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ profileId: profile.id, genderFilter, preferCountries, avoidCountries: blockCountries }),
-        });
-
-        const enqueueData = await safeJson(enqueueRes);
-        if (!enqueueData) {
-          console.error('[matchmaking] enqueue failed or returned non-JSON');
-          if (active) setCallState('idle');
-          return;
+        let enqueueData: any = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (!active) return;
+          if (attempt > 0) await new Promise(r => setTimeout(r, attempt * 1500));
+          const enqueueRes = await fetch('/api/enqueue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profileId: profile.id, genderFilter, preferCountries, avoidCountries: blockCountries }),
+          });
+          enqueueData = await safeJson(enqueueRes);
+          if (enqueueData && !enqueueData.error) break;
+          console.warn('[matchmaking] enqueue attempt', attempt + 1, 'failed:', enqueueData?.error ?? 'non-JSON');
+          enqueueData = null;
         }
 
-        if (enqueueData.error) {
-          console.error('[matchmaking] enqueue error:', enqueueData.error);
+        if (!enqueueData) {
+          console.error('[matchmaking] enqueue failed after retries');
           if (active) setCallState('idle');
           return;
         }
